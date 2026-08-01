@@ -154,6 +154,13 @@ typedef struct _DECODE_UNIT {
     // (happens when the frame is repeated).
     uint16_t frameHostProcessingLatency;
 
+    // Optional host capture latency of the frame, in 1/10 ms units: the time
+    // between compositor present and the host capture pipeline dequeuing the
+    // frame. This wait is NOT included in frameHostProcessingLatency, so the
+    // two may be summed for total host-side latency. Zero when the host does
+    // not provide it (only Vibeshine hosts populate this field).
+    uint16_t frameCaptureLatency;
+
     // Receive time of first buffer in microseconds.
     uint64_t receiveTimeUs;
 

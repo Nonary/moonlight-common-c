@@ -19,6 +19,7 @@ static uint16_t lastPacketPayloadLength;
 static bool strictIdrFrameWait;
 static uint64_t syntheticPtsBaseUs;
 static uint16_t frameHostProcessingLatency;
+static uint16_t frameCaptureLatency;
 static uint64_t firstPacketReceiveTimeUs;
 static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
@@ -71,6 +72,7 @@ void initializeVideoDepacketizer(int pktSize) {
     decodingFrame = false;
     syntheticPtsBaseUs = 0;
     frameHostProcessingLatency = 0;
+    frameCaptureLatency = 0;
     firstPacketReceiveTimeUs = 0;
     firstPacketPresentationTime = 0;
     firstPacketRtpTimestamp = 0;
@@ -485,6 +487,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.frameType = frameType;
             qdu->decodeUnit.frameNumber = frameNumber;
             qdu->decodeUnit.frameHostProcessingLatency = frameHostProcessingLatency;
+            qdu->decodeUnit.frameCaptureLatency = frameCaptureLatency;
             qdu->decodeUnit.receiveTimeUs = firstPacketReceiveTimeUs;
             qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
             qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
@@ -909,6 +912,15 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             BYTE_BUFFER bb;
             BbInitializeWrappedBuffer(&bb, currentPos.data, currentPos.offset + 4, 2, BYTE_ORDER_LITTLE);
             BbGet16(&bb, &lastPacketPayloadLength);
+        }
+
+        // Vibeshine additionally reports the host capture latency in the final
+        // two bytes of the short header; other hosts leave them zeroed.
+        LC_ASSERT_VT(currentPos.length >= 8);
+        if (IS_SUNSHINE() && currentPos.length >= 8) {
+            BYTE_BUFFER bb;
+            BbInitializeWrappedBuffer(&bb, currentPos.data, currentPos.offset + 6, 2, BYTE_ORDER_LITTLE);
+            BbGet16(&bb, &frameCaptureLatency);
         }
 
         if (APP_VERSION_AT_LEAST(7, 1, 450)) {
