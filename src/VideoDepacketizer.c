@@ -20,6 +20,7 @@ static bool strictIdrFrameWait;
 static uint64_t syntheticPtsBaseUs;
 static uint16_t frameHostProcessingLatency;
 static uint16_t frameCaptureLatency;
+static uint16_t frameTransportPrepLatency;
 static uint64_t firstPacketReceiveTimeUs;
 static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
@@ -73,6 +74,7 @@ void initializeVideoDepacketizer(int pktSize) {
     syntheticPtsBaseUs = 0;
     frameHostProcessingLatency = 0;
     frameCaptureLatency = 0;
+    frameTransportPrepLatency = 0;
     firstPacketReceiveTimeUs = 0;
     firstPacketPresentationTime = 0;
     firstPacketRtpTimestamp = 0;
@@ -488,6 +490,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.frameNumber = frameNumber;
             qdu->decodeUnit.frameHostProcessingLatency = frameHostProcessingLatency;
             qdu->decodeUnit.frameCaptureLatency = frameCaptureLatency;
+            qdu->decodeUnit.frameTransportPrepLatency = frameTransportPrepLatency;
             qdu->decodeUnit.receiveTimeUs = firstPacketReceiveTimeUs;
             qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
             qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
@@ -921,6 +924,17 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             BYTE_BUFFER bb;
             BbInitializeWrappedBuffer(&bb, currentPos.data, currentPos.offset + 6, 2, BYTE_ORDER_LITTLE);
             BbGet16(&bb, &frameCaptureLatency);
+        }
+
+        // A Vibeshine client opts into the 24-byte 7.1.431 long header. Its
+        // first extension word reports the preceding frame's host transport
+        // preparation delay. Standard short headers keep this value at zero.
+        frameTransportPrepLatency = 0;
+        if (IS_SUNSHINE() && currentPos.length >= 10 &&
+                currentPos.data[currentPos.offset] == (char)0x81) {
+            BYTE_BUFFER bb;
+            BbInitializeWrappedBuffer(&bb, currentPos.data, currentPos.offset + 8, 2, BYTE_ORDER_LITTLE);
+            BbGet16(&bb, &frameTransportPrepLatency);
         }
 
         if (APP_VERSION_AT_LEAST(7, 1, 450)) {

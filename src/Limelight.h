@@ -161,6 +161,11 @@ typedef struct _DECODE_UNIT {
     // not provide it (only Vibeshine hosts populate this field).
     uint16_t frameCaptureLatency;
 
+    // Optional Vibeshine transport-preparation latency, in 1/10 ms units.
+    // This is the preceding frame's measured time from host timing-header
+    // construction through the first video packet send. Zero when unavailable.
+    uint16_t frameTransportPrepLatency;
+
     // Receive time of first buffer in microseconds.
     uint64_t receiveTimeUs;
 
