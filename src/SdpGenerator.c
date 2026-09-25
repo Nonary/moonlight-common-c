@@ -433,7 +433,18 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         snprintf(payloadStr, sizeof(payloadStr), "%d", slicesPerFrame);
         err |= addAttributeString(&optionHead, "x-nv-video[0].videoEncoderSlicesPerFrame", payloadStr);
 
-        if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
+        if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+            err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "3");
+
+            // Aurora-compatible attributes: their presence tells PyroWave hosts that
+            // we parse record framing. We never ask for their adaptive modes.
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveAdaptiveFec", "0");
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveAdaptiveBitrate", "0");
+
+            snprintf(payloadStr, sizeof(payloadStr), "%u", (unsigned int)PYROWAVE_FEATURE_RECORD_FRAMING);
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveFeatures", payloadStr);
+        }
+        else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "2");
         }
         else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_H265) {

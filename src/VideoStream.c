@@ -34,6 +34,10 @@ static bool receivedFullFrame;
 // and subsequent packet/frame bursts that follow.
 #define RTP_RECV_PACKETS_BUFFERED 2048
 
+// PyroWave frames are intra-coded at hundreds of Mbps; a 1080p120 or 4K60 frame
+// alone can approach 2048 packets. Keep several frames of headroom.
+#define RTP_RECV_PACKETS_BUFFERED_PYROWAVE 8192
+
 // Initialize the video stream
 void initializeVideoStream(void) {
     initializeVideoDepacketizer(StreamConfig.packetSize);
@@ -329,7 +333,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
     }
 
     rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
-                              RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
+                              ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ?
+                                   RTP_RECV_PACKETS_BUFFERED_PYROWAVE : RTP_RECV_PACKETS_BUFFERED) *
+                                  (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
                               SOCK_QOS_TYPE_VIDEO);
     if (rtpSocket == INVALID_SOCKET) {
         VideoCallbacks.cleanup();

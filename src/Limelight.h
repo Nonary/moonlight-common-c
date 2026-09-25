@@ -233,12 +233,30 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_AV1_HIGH8_444   0x4000 // AV1 High 4:4:4 8-bit profile
 #define VIDEO_FORMAT_AV1_HIGH10_444  0x8000 // AV1 High 4:4:4 10-bit profile
 
+// PyroWave intra-only GPU wavelet codec (Sunshine extension). The values match
+// the Aurora/Solarflare implementation. Every frame is independently decodable;
+// see moonlight-qt docs/pyrowave-protocol.md for the wire format.
+#define VIDEO_FORMAT_PYROWAVE           0x010000 // PyroWave 8-bit 4:2:0
+#define VIDEO_FORMAT_PYROWAVE_444       0x020000 // PyroWave 8-bit 4:4:4
+#define VIDEO_FORMAT_PYROWAVE_HDR10     0x040000 // PyroWave 10-bit 4:2:0 (HDR10 on HDR displays)
+#define VIDEO_FORMAT_PYROWAVE_HDR10_444 0x080000 // PyroWave 10-bit 4:4:4
+
 // Masks for clients to use to match video codecs without profile-specific details.
-#define VIDEO_FORMAT_MASK_H264   0x000F
-#define VIDEO_FORMAT_MASK_H265   0x0F00
-#define VIDEO_FORMAT_MASK_AV1    0xF000
-#define VIDEO_FORMAT_MASK_10BIT  0xAA00
-#define VIDEO_FORMAT_MASK_YUV444 0xCC04
+#define VIDEO_FORMAT_MASK_H264     0x000F
+#define VIDEO_FORMAT_MASK_H265     0x0F00
+#define VIDEO_FORMAT_MASK_AV1      0xF000
+#define VIDEO_FORMAT_MASK_PYROWAVE 0x0F0000
+#define VIDEO_FORMAT_MASK_10BIT    0xCAA00
+#define VIDEO_FORMAT_MASK_YUV444   0xACC04
+
+// PyroWave bitstream identity (first 8 hex digits of the pyrowave commit the
+// codec was vendored from). The bitstream has no version field of its own, so
+// Sunshine hosts advertise theirs in the RTSP DESCRIBE response.
+#define PYROWAVE_BITSTREAM_ID "186f0393"
+
+// x-ss-video[0].pyrowaveFeatures bits sent in the RTSP ANNOUNCE.
+#define PYROWAVE_FEATURE_RECORD_FRAMING 0x1 // Parses record framing with padding records
+#define PYROWAVE_FEATURE_PARTIAL_FRAMES 0x2 // Decodes frames with missing records
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
@@ -519,13 +537,18 @@ void LiInitializeConnectionCallbacks(PCONNECTION_LISTENER_CALLBACKS clCallbacks)
 #define SCM_HEVC_REXT10_444 0x00100000 // Sunshine extension
 #define SCM_AV1_HIGH8_444   0x00200000 // Sunshine extension
 #define SCM_AV1_HIGH10_444  0x00400000 // Sunshine extension
+#define SCM_PYROWAVE           0x00800000 // Sunshine extension
+#define SCM_PYROWAVE_444       0x01000000 // Sunshine extension
+#define SCM_PYROWAVE_HDR10     0x02000000 // Sunshine extension
+#define SCM_PYROWAVE_HDR10_444 0x04000000 // Sunshine extension
 
 // SCM masks to identify various codec capabilities
-#define SCM_MASK_H264   (SCM_H264 | SCM_H264_HIGH8_444)
-#define SCM_MASK_HEVC   (SCM_HEVC | SCM_HEVC_MAIN10 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444)
-#define SCM_MASK_AV1    (SCM_AV1_MAIN8 | SCM_AV1_MAIN10 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
+#define SCM_MASK_H264     (SCM_H264 | SCM_H264_HIGH8_444)
+#define SCM_MASK_HEVC     (SCM_HEVC | SCM_HEVC_MAIN10 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444)
+#define SCM_MASK_AV1      (SCM_AV1_MAIN8 | SCM_AV1_MAIN10 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
+#define SCM_MASK_PYROWAVE (SCM_PYROWAVE | SCM_PYROWAVE_444 | SCM_PYROWAVE_HDR10 | SCM_PYROWAVE_HDR10_444)
+#define SCM_MASK_10BIT    (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_HDR10 | SCM_PYROWAVE_HDR10_444)
+#define SCM_MASK_YUV444   (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_444 | SCM_PYROWAVE_HDR10_444)
 
 typedef struct _SERVER_INFORMATION {
     // Server host name or IP address in text form
@@ -1006,6 +1029,12 @@ typedef struct _SS_HDR_METADATA {
 // from the host PC's monitor and content (if available). It is only valid to call this
 // function when HDR mode is active on the host. This is a Sunshine protocol extension.
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
+
+// Returns the PyroWave bitstream identity the host advertised in its RTSP DESCRIBE
+// response (see PYROWAVE_BITSTREAM_ID), or an empty string if it sent none. Hosts
+// that encode PyroWave without advertising it use an unknown bitstream revision.
+// Valid after the RTSP handshake. This is a Sunshine protocol extension.
+const char* LiGetHostPyroWaveBitstreamId(void);
 
 // This function requests an IDR frame from the host. Typically this is done using DR_NEED_IDR, but clients
 // processing frames asynchronously may need to reset their decoder state even after returning DR_OK for
