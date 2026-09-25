@@ -602,7 +602,7 @@ static int getBufferFlags(char* data, int length) {
 
 // As an optimization, we can cast the existing packet buffer to a PLENTRY and avoid
 // a malloc() and a memcpy() of the packet data.
-static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offset, int length) {
+static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offset, int length, bool lost) {
     PLENTRY_INTERNAL entry;
 
     if (existingEntry == NULL || *existingEntry == NULL) {
@@ -634,7 +634,7 @@ static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offse
             *existingEntry = NULL;
         }
 
-        entry->entry.bufferType = getBufferFlags(entry->entry.data, entry->entry.length);
+        entry->entry.bufferType = lost ? BUFFER_TYPE_LOST : getBufferFlags(entry->entry.data, entry->entry.length);
 
         nalChainDataLength += entry->entry.length;
 
@@ -708,7 +708,7 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
         // To minimize copies, we'll allocate for SPS, PPS, and VPS to allow
         // us to reuse the packet buffer for the picture data in the I-frame.
         queueFragment(containsPicData ? existingEntry : NULL,
-                      currentPos->data, start, currentPos->offset - start);
+                      currentPos->data, start, currentPos->offset - start, false);
     }
 }
 
@@ -742,9 +742,10 @@ static bool isFirstPacket(uint8_t flags, uint8_t fecBlockNumber) {
 
 // Process an RTP Payload
 // The caller will free *existingEntry unless we NULL it
+// A lost payload is a zero-filled stand-in from the RtpVideoQueue (PyroWave only)
 static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                        uint64_t receiveTimeUs, uint64_t presentationTimeUs, uint32_t rtpTimestamp,
-                       PLENTRY_INTERNAL* existingEntry) {
+                       bool lost, PLENTRY_INTERNAL* existingEntry) {
     BUFFER_DESC currentPos;
     uint32_t frameIndex;
     uint8_t flags;
@@ -1021,7 +1022,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
 #endif
 
-            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, false);
         }
     }
     else {
@@ -1065,7 +1066,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         }
 
         // Other codecs are just passed through as is.
-        queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+        queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, lost);
     }
 
     if (lastPacket) {
@@ -1183,6 +1184,7 @@ void queueRtpPacket(PRTPV_QUEUE_ENTRY queueEntryPtr) {
                       queueEntry.receiveTimeUs,
                       queueEntry.presentationTimeUs,
                       queueEntry.rtpTimestamp,
+                      queueEntry.isLost,
                       &existingEntry);
 
     if (existingEntry != NULL) {

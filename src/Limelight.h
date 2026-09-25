@@ -113,6 +113,12 @@ void LiInitializeStreamConfiguration(PSTREAM_CONFIGURATION streamConfig);
 #define BUFFER_TYPE_PPS      0x02
 #define BUFFER_TYPE_VPS      0x03
 
+// A zero-filled buffer standing in for a packet that never arrived. Only
+// PyroWave frames carry these: every PyroWave frame is independent, so a frame
+// with missing packets is still delivered and the decoder salvages the rest.
+// The buffer has the length the lost packet's payload would have had.
+#define BUFFER_TYPE_LOST     0x04
+
 typedef struct _LENTRY {
     // Pointer to the next entry or NULL if this is the last entry
     struct _LENTRY* next;
@@ -123,7 +129,8 @@ typedef struct _LENTRY {
     // Size of data in bytes (never <= 0)
     int length;
 
-    // Buffer type (listed above, only set for H.264 and HEVC formats)
+    // Buffer type (listed above, only set for H.264 and HEVC formats,
+    // except BUFFER_TYPE_LOST which PyroWave frames may carry)
     int bufferType;
 } LENTRY, *PLENTRY;
 
@@ -255,8 +262,9 @@ typedef struct _DECODE_UNIT {
 #define PYROWAVE_BITSTREAM_ID "186f0393"
 
 // x-ss-video[0].pyrowaveFeatures bits sent in the RTSP ANNOUNCE.
+// Partial-frame decoding needs no bit: a record-framed client always decodes
+// what arrives, and 0x2 (once reserved for it) is ignored by hosts.
 #define PYROWAVE_FEATURE_RECORD_FRAMING 0x1 // Parses record framing with padding records
-#define PYROWAVE_FEATURE_PARTIAL_FRAMES 0x2 // Decodes frames with missing records
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
