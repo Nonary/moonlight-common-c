@@ -119,6 +119,11 @@ void LiInitializeStreamConfiguration(PSTREAM_CONFIGURATION streamConfig);
 // The buffer has the length the lost packet's payload would have had.
 #define BUFFER_TYPE_LOST     0x04
 
+// PyroWave picture data whose first byte starts a record, as flagged by the
+// host (vibeshine). After a lost record header, parsing resumes at the next
+// such buffer. Other PyroWave picture data is BUFFER_TYPE_PICDATA.
+#define BUFFER_TYPE_RECORD_START 0x05
+
 typedef struct _LENTRY {
     // Pointer to the next entry or NULL if this is the last entry
     struct _LENTRY* next;
@@ -129,8 +134,8 @@ typedef struct _LENTRY {
     // Size of data in bytes (never <= 0)
     int length;
 
-    // Buffer type (listed above, only set for H.264 and HEVC formats,
-    // except BUFFER_TYPE_LOST which PyroWave frames may carry)
+    // Buffer type (listed above, only set for H.264 and HEVC formats, except
+    // BUFFER_TYPE_LOST and BUFFER_TYPE_RECORD_START which PyroWave frames carry)
     int bufferType;
 } LENTRY, *PLENTRY;
 
@@ -198,6 +203,12 @@ typedef struct _DECODE_UNIT {
     // Note: This is not currently parsed from the actual bitstream, so if your
     // client has access to a bitstream parser, prefer that over this field.
     uint8_t colorspace;
+
+    // PyroWave only: the number of leading buffers (RTP packets) that hold the
+    // sequence header and the coarsest wavelet level, as the host announced it
+    // in the frame header, or 0 if it did not. A frame that lost any of them
+    // cannot be decoded; a loss after them only blurs part of the picture.
+    uint16_t pyrowaveCriticalPackets;
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)

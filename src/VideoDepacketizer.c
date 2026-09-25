@@ -24,6 +24,7 @@ static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
+static uint16_t pyrowaveCriticalPackets;
 
 #define DR_CLEANUP -1000
 
@@ -77,6 +78,7 @@ void initializeVideoDepacketizer(int pktSize) {
     lastPacketPayloadLength = 0;
     dropStatePending = false;
     idrFrameProcessed = false;
+    pyrowaveCriticalPackets = 0;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
 }
 
@@ -214,9 +216,14 @@ void validateDecodeUnitForPlayback(PDECODE_UNIT decodeUnit) {
             LC_ASSERT_VT(decodeUnit->bufferList->next->next->bufferType == BUFFER_TYPE_PPS);
             LC_ASSERT_VT(decodeUnit->bufferList->next->next->next != NULL);
         }
-        else if (NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_PYROWAVE)) {
-            // We don't parse the AV1 or PyroWave bitstreams
+        else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
+            // We don't parse the AV1 bitstream
             LC_ASSERT_VT(decodeUnit->bufferList->bufferType == BUFFER_TYPE_PICDATA);
+        }
+        else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+            // The first packet is never a lost one; hosts may flag it as a record start
+            LC_ASSERT_VT(decodeUnit->bufferList->bufferType == BUFFER_TYPE_PICDATA ||
+                         decodeUnit->bufferList->bufferType == BUFFER_TYPE_RECORD_START);
         }
         else {
             LC_ASSERT(false);
@@ -489,6 +496,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
             qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
             qdu->decodeUnit.enqueueTimeUs = PltGetMicroseconds();
+            qdu->decodeUnit.pyrowaveCriticalPackets = pyrowaveCriticalPackets;
 
             // These might be wrong for a few frames during a transition between SDR and HDR,
             // but the effects shouldn't very noticable since that's an infrequent operation.
@@ -602,7 +610,7 @@ static int getBufferFlags(char* data, int length) {
 
 // As an optimization, we can cast the existing packet buffer to a PLENTRY and avoid
 // a malloc() and a memcpy() of the packet data.
-static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offset, int length, bool lost) {
+static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offset, int length, bool lost, bool recordStart) {
     PLENTRY_INTERNAL entry;
 
     if (existingEntry == NULL || *existingEntry == NULL) {
@@ -634,7 +642,9 @@ static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offse
             *existingEntry = NULL;
         }
 
-        entry->entry.bufferType = lost ? BUFFER_TYPE_LOST : getBufferFlags(entry->entry.data, entry->entry.length);
+        entry->entry.bufferType = lost ? BUFFER_TYPE_LOST :
+                                  recordStart ? BUFFER_TYPE_RECORD_START :
+                                  getBufferFlags(entry->entry.data, entry->entry.length);
 
         nalChainDataLength += entry->entry.length;
 
@@ -708,7 +718,7 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
         // To minimize copies, we'll allocate for SPS, PPS, and VPS to allow
         // us to reuse the packet buffer for the picture data in the I-frame.
         queueFragment(containsPicData ? existingEntry : NULL,
-                      currentPos->data, start, currentPos->offset - start, false);
+                      currentPos->data, start, currentPos->offset - start, false, false);
     }
 }
 
@@ -912,6 +922,16 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             BbGet16(&bb, &lastPacketPayloadLength);
         }
 
+        // Vibeshine announces how many leading packets of a PyroWave frame hold its
+        // coarsest wavelet level in the last two bytes of the short frame header
+        pyrowaveCriticalPackets = 0;
+        if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) && currentPos.data[currentPos.offset] == 0x01 &&
+                currentPos.length >= 8) {
+            BYTE_BUFFER bb;
+            BbInitializeWrappedBuffer(&bb, currentPos.data, currentPos.offset + 6, 2, BYTE_ORDER_LITTLE);
+            BbGet16(&bb, &pyrowaveCriticalPackets);
+        }
+
         if (APP_VERSION_AT_LEAST(7, 1, 450)) {
             // >= 7.1.450 uses 2 different header lengths based on the first byte:
             // 0x01 indicates an 8 byte header
@@ -1022,7 +1042,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
 #endif
 
-            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, false);
+            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, false, false);
         }
     }
     else {
@@ -1066,7 +1086,9 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         }
 
         // Other codecs are just passed through as is.
-        queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, lost);
+        queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length, lost,
+                      (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) &&
+                          (extraFlags & NV_VIDEO_PACKET_EXTRA_FLAG_PYROWAVE_RECORD_START));
     }
 
     if (lastPacket) {
