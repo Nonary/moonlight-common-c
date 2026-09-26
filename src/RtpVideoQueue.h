@@ -26,6 +26,8 @@ typedef struct _RTP_VIDEO_QUEUE {
     RTPV_QUEUE_LIST completedFecBlockList;
 
     uint64_t bufferFirstRecvTimeUs;
+    // Only a PyroWave final block without parity may have a silence deadline.
+    uint64_t pendingFrameDeadlineUs;
     uint32_t bufferLowestSequenceNumber;
     uint32_t bufferHighestSequenceNumber;
     uint32_t bufferFirstParitySequenceNumber;
@@ -59,4 +61,7 @@ void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue);
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue);
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry);
 uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue);
+uint64_t RtpvGetPendingFrameDeadlineUs(PRTP_VIDEO_QUEUE queue);
+// Call only after draining the receive socket, on the receive thread.
+bool RtpvExpirePendingFrame(PRTP_VIDEO_QUEUE queue, uint64_t nowUs);
 void RtpvSubmitQueuedPackets(PRTP_VIDEO_QUEUE queue);

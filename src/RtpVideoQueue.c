@@ -17,6 +17,11 @@
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90
 
+// Optional PyroWave detail has no parity. Give reordered packets a short
+// silence interval, then deliver the usable frame instead of waiting for the
+// next frame to announce that a packet (possibly EOF itself) was lost.
+#define PYROWAVE_PACKET_SILENCE_US 1000
+
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
     memset(queue, 0, sizeof(*queue));
@@ -39,6 +44,7 @@ static void purgeListEntries(PRTPV_QUEUE_LIST list) {
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue) {
     purgeListEntries(&queue->pendingFecBlockList);
     purgeListEntries(&queue->completedFecBlockList);
+    queue->pendingFrameDeadlineUs = 0;
 }
 
 static void insertEntryIntoList(PRTPV_QUEUE_LIST list, PRTPV_QUEUE_ENTRY entry) {
@@ -548,7 +554,7 @@ static void submitCompletedFrame(PRTP_VIDEO_QUEUE queue) {
 // possible (other codecs, the frame's first packet with the frame header and
 // PyroWave sequence header is missing, or out of memory); the caller then drops
 // the block as before.
-static bool completeBlockWithLostPackets(PRTP_VIDEO_QUEUE queue) {
+static bool completeBlockWithLostPackets(PRTP_VIDEO_QUEUE queue, const char* reason) {
     PRTPV_QUEUE_ENTRY reference = NULL;
     PRTPV_QUEUE_ENTRY entry;
     bool* present;
@@ -639,12 +645,104 @@ static bool completeBlockWithLostPackets(PRTP_VIDEO_QUEUE queue) {
 
     free(present);
 
-    Limelog("Delivering frame %u (block %d of %d) without %u of %u data packets\n",
+    Limelog("Delivering frame %u (block %d of %d) without %u of %u data packets (%s)\n",
             queue->currentFrameNumber, queue->multiFecCurrentBlockNumber + 1,
-            queue->multiFecLastBlockNumber + 1, lostPackets, queue->bufferDataPackets);
+            queue->multiFecLastBlockNumber + 1, lostPackets, queue->bufferDataPackets, reason);
 
     stageCompleteFecBlock(queue);
     LC_ASSERT(queue->pendingFecBlockList.count == 0);
+    return true;
+}
+
+// Never shorten critical-data recovery. The record-framing header announces
+// the exact leading packet count required by the decoder. Earlier blocks are
+// staged in order; the pending final block can still contain reordered packets.
+static bool hasCompletePyroWaveCriticalData(PRTP_VIDEO_QUEUE queue) {
+    PRTPV_QUEUE_ENTRY first = queue->completedFecBlockList.head;
+    PRTPV_QUEUE_ENTRY entry;
+    unsigned int criticalPackets, remaining, received;
+    int dataOffset;
+    PNV_VIDEO_PACKET videoPacket;
+    const unsigned char* header;
+
+    if (first == NULL) {
+        if (queue->multiFecCurrentBlockNumber != 0) {
+            return false;
+        }
+        for (entry = queue->pendingFecBlockList.head; entry != NULL; entry = entry->next) {
+            if (!entry->isParity && entry->packet->sequenceNumber == queue->bufferLowestSequenceNumber) {
+                first = entry;
+                break;
+            }
+        }
+    }
+    if (first == NULL || first->isLost) {
+        return false;
+    }
+
+    dataOffset = sizeof(RTP_PACKET) + ((first->packet->header & FLAG_EXTENSION) ? 4 : 0);
+    if (first->length < dataOffset + (int)sizeof(NV_VIDEO_PACKET) + 8) {
+        return false;
+    }
+    videoPacket = (PNV_VIDEO_PACKET)(((char*)first->packet) + dataOffset);
+    header = (const unsigned char*)(videoPacket + 1);
+    if (!(videoPacket->extraFlags & NV_VIDEO_PACKET_EXTRA_FLAG_PYROWAVE_RECORD_START) || header[0] != 0x01) {
+        return false;
+    }
+    criticalPackets = header[6] | ((unsigned int)header[7] << 8);
+    if (criticalPackets == 0) {
+        return false;
+    }
+
+    remaining = criticalPackets;
+    for (entry = queue->completedFecBlockList.head; entry != NULL; entry = entry->next) {
+        if (entry->isLost) {
+            return false;
+        }
+        if (--remaining == 0) {
+            return true;
+        }
+    }
+    if (remaining > queue->bufferDataPackets) {
+        return false;
+    }
+    received = 0;
+    for (entry = queue->pendingFecBlockList.head; entry != NULL; entry = entry->next) {
+        if (!entry->isParity && !entry->isLost &&
+                U16(entry->packet->sequenceNumber - queue->bufferLowestSequenceNumber) < remaining) {
+            received++;
+        }
+    }
+    // queuePacket() rejects duplicates, so every required prefix index is
+    // present when the count matches, regardless of arrival order.
+    return received == remaining;
+}
+
+uint64_t RtpvGetPendingFrameDeadlineUs(PRTP_VIDEO_QUEUE queue) {
+    return queue->pendingFrameDeadlineUs;
+}
+
+bool RtpvExpirePendingFrame(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    if (queue->pendingFrameDeadlineUs == 0 || nowUs < queue->pendingFrameDeadlineUs) {
+        return false;
+    }
+    // An unsafe/unknown critical prefix falls back to boundary-based delivery.
+    // A subsequently received unique packet will arm another silence interval.
+    queue->pendingFrameDeadlineUs = 0;
+    if (!(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ||
+            queue->pendingFecBlockList.count == 0 || queue->bufferParityPackets != 0 ||
+            queue->multiFecCurrentBlockNumber != queue->multiFecLastBlockNumber ||
+            !hasCompletePyroWaveCriticalData(queue)) {
+        return false;
+    }
+
+    reportFinalFrameFecStatus(queue);
+    if (!completeBlockWithLostPackets(queue, "packet silence")) {
+        return false;
+    }
+    submitCompletedFrame(queue);
+    queue->currentFrameNumber++;
+    queue->multiFecCurrentBlockNumber = 0;
     return true;
 }
 
@@ -704,6 +802,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     // if we can't finish a frame before receiving the next one.
     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
+        queue->pendingFrameDeadlineUs = 0;
         if (queue->pendingFecBlockList.count != 0) {
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
@@ -716,7 +815,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                                     fecCurrentBlockNumber == queue->multiFecCurrentBlockNumber + 1;
             bool lastBlockOfFrame = queue->currentFrameNumber != nvPacket->frameIndex &&
                                     queue->multiFecCurrentBlockNumber == queue->multiFecLastBlockNumber;
-            if ((nextBlockOfFrame || lastBlockOfFrame) && completeBlockWithLostPackets(queue)) {
+            if ((nextBlockOfFrame || lastBlockOfFrame) && completeBlockWithLostPackets(queue, "next boundary")) {
                 if (nextBlockOfFrame) {
                     queue->multiFecCurrentBlockNumber++;
                 }
@@ -898,9 +997,18 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
             LC_ASSERT(queue->receivedParityPackets <= queue->bufferParityPackets);
         }
 
+        if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) && queue->bufferParityPackets == 0 &&
+                queue->multiFecCurrentBlockNumber == queue->multiFecLastBlockNumber) {
+            // Only accepted unique packets extend the grace. Do not expire it
+            // here: a paused receive thread may still have reordered data in
+            // the kernel socket queue, which must be drained first.
+            queue->pendingFrameDeadlineUs = PltGetMicroseconds() + PYROWAVE_PACKET_SILENCE_US;
+        }
+
         // Try to submit this frame. If we haven't received enough packets,
         // this will fail and we'll keep waiting.
         if (reconstructFrame(queue) == 0) {
+            queue->pendingFrameDeadlineUs = 0;
             // Stage the complete FEC block for use once reassembly is complete
             stageCompleteFecBlock(queue);
 

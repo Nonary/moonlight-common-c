@@ -95,6 +95,7 @@ static void VideoReceiveThreadProc(void* context) {
     bool useSelect;
     int waitingForVideoMs;
     bool encrypted;
+    bool usePartialFrameTimeout;
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
     decryptedSize = StreamConfig.packetSize + MAX_RTP_HEADER_SIZE;
@@ -103,7 +104,12 @@ static void VideoReceiveThreadProc(void* context) {
     bufferSize = decryptedSize + sizeof(RTPV_QUEUE_ENTRY);
     buffer = NULL;
 
-    if (setNonFatalRecvTimeoutMs(rtpSocket, UDP_RECV_POLL_TIMEOUT_MS) < 0) {
+    usePartialFrameTimeout = (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) != 0 &&
+                            setSocketNonBlocking(rtpSocket, true) == 0;
+    if (usePartialFrameTimeout) {
+        useSelect = false; // The nonblocking helper polls only after draining a burst.
+    }
+    else if (setNonFatalRecvTimeoutMs(rtpSocket, UDP_RECV_POLL_TIMEOUT_MS) < 0) {
         // SO_RCVTIMEO failed, so use select() to wait
         useSelect = true;
     }
@@ -138,16 +144,36 @@ static void VideoReceiveThreadProc(void* context) {
             }
         }
 
-        err = recvUdpSocket(rtpSocket,
-                            encrypted ? encryptedBuffer : buffer,
-                            receiveSize,
-                            useSelect);
+        if (usePartialFrameTimeout) {
+            int timeoutMs = UDP_RECV_POLL_TIMEOUT_MS;
+            uint64_t deadlineUs = RtpvGetPendingFrameDeadlineUs(&rtpQueue);
+            if (deadlineUs != 0) {
+                uint64_t nowUs = PltGetMicroseconds();
+                timeoutMs = nowUs >= deadlineUs ? 0 :
+                    (int)((deadlineUs - nowUs + 999) / 1000);
+                if (timeoutMs > UDP_RECV_POLL_TIMEOUT_MS) {
+                    timeoutMs = UDP_RECV_POLL_TIMEOUT_MS;
+                }
+            }
+            err = recvUdpSocketWithTimeout(rtpSocket,
+                                          encrypted ? encryptedBuffer : buffer,
+                                          receiveSize, timeoutMs);
+        }
+        else {
+            err = recvUdpSocket(rtpSocket,
+                                encrypted ? encryptedBuffer : buffer,
+                                receiveSize,
+                                useSelect);
+        }
         if (err < 0) {
             Limelog("Video Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
             break;
         }
         else if  (err == 0) {
+            if (usePartialFrameTimeout) {
+                RtpvExpirePendingFrame(&rtpQueue, PltGetMicroseconds());
+            }
             if (!receivedDataFromPeer) {
                 // If we wait many seconds without ever receiving a video packet,
                 // assume something is broken and terminate the connection.
