@@ -332,14 +332,33 @@ int startVideoStream(void* rendererContext, int drFlags) {
         return err;
     }
 
-    rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
-                              ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ?
+    int requestedBufferSize = ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ?
                                    RTP_RECV_PACKETS_BUFFERED_PYROWAVE : RTP_RECV_PACKETS_BUFFERED) *
-                                  (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
-                              SOCK_QOS_TYPE_VIDEO);
+                              (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE);
+    rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
+                              requestedBufferSize, SOCK_QOS_TYPE_VIDEO);
     if (rtpSocket == INVALID_SOCKET) {
         VideoCallbacks.cleanup();
         return LastSocketError();
+    }
+
+    if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+        // A PyroWave frame can be hundreds of packets arriving at line rate.
+        // Linux silently clamps SO_RCVBUF to net.core.rmem_max, and packets
+        // beyond the clamped buffer are dropped by the kernel.
+        int actualBufferSize = 0;
+        SOCKADDR_LEN len = sizeof(actualBufferSize);
+        if (getsockopt(rtpSocket, SOL_SOCKET, SO_RCVBUF, (char*)&actualBufferSize, &len) == 0) {
+#ifdef __linux__
+            // Linux reports double the usable size to account for its overhead
+            actualBufferSize /= 2;
+#endif
+            if (actualBufferSize < requestedBufferSize) {
+                Limelog("WARNING: video receive buffer is %d KB of %d KB requested; "
+                        "PyroWave frames may lose packets (on Linux, raise net.core.rmem_max)\n",
+                        actualBufferSize / 1024, requestedBufferSize / 1024);
+            }
+        }
     }
 
     VideoCallbacks.start();
