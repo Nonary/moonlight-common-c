@@ -149,8 +149,16 @@ static void VideoReceiveThreadProc(void* context) {
             uint64_t deadlineUs = RtpvGetPendingFrameDeadlineUs(&rtpQueue);
             if (deadlineUs != 0) {
                 uint64_t nowUs = PltGetMicroseconds();
-                timeoutMs = nowUs >= deadlineUs ? 0 :
-                    (int)((deadlineUs - nowUs + 999) / 1000);
+                uint64_t remainingUs = nowUs >= deadlineUs ? 0 : deadlineUs - nowUs;
+                if (RtpvPendingFrameDeadlineIsPrecise(&rtpQueue)) {
+                    // A poll can overshoot its millisecond timeout. Wake at
+                    // least a millisecond early and poll without blocking for
+                    // the remainder, so the frame still makes its slot.
+                    timeoutMs = remainingUs >= 2000 ? (int)((remainingUs - 1000) / 1000) : 0;
+                }
+                else {
+                    timeoutMs = (int)((remainingUs + 999) / 1000);
+                }
                 if (timeoutMs > UDP_RECV_POLL_TIMEOUT_MS) {
                     timeoutMs = UDP_RECV_POLL_TIMEOUT_MS;
                 }

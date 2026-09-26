@@ -902,6 +902,15 @@ uint64_t LiGetMicroseconds(void);
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);
 
+// PyroWave only. Called on the video receive thread with the RTP timestamp of a
+// frame whose final FEC block is still incomplete. Return the latest
+// LiGetMicroseconds() time at which that frame can finish reassembly and still
+// reach its presentation slot, or 0 when unknown. Past that time, a frame with
+// its critical packets is delivered after a much shorter packet silence than
+// usual. Set it before LiStartConnection(); NULL disables it.
+typedef uint64_t (*LiVideoReassemblyDeadlineCallback)(uint32_t rtpTimestamp);
+void LiSetVideoReassemblyDeadlineCallback(LiVideoReassemblyDeadlineCallback callback);
+
 // This is a simplistic STUN function that can assist clients in getting the WAN address
 // for machines they find using mDNS over IPv4. This can be used to pre-populate the external
 // address for streaming after GFE stopped sending it a while back. wanAddr is returned in

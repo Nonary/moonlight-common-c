@@ -22,6 +22,18 @@
 // next frame to announce that a packet (possibly EOF itself) was lost.
 #define PYROWAVE_PACKET_SILENCE_US 1000
 
+// Once the client's on-time deadline has passed, a short silence is enough
+// evidence that the burst ended; the usual reorder allowance would only make
+// the frame late. A frame still receiving packets is never cut short, so slow
+// delivery stays visible to the client's pacer instead of turning into blur.
+#define PYROWAVE_LATE_PACKET_SILENCE_US 250
+
+static LiVideoReassemblyDeadlineCallback reassemblyDeadlineCallback;
+
+void LiSetVideoReassemblyDeadlineCallback(LiVideoReassemblyDeadlineCallback callback) {
+    reassemblyDeadlineCallback = callback;
+}
+
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
     memset(queue, 0, sizeof(*queue));
@@ -45,6 +57,8 @@ void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue) {
     purgeListEntries(&queue->pendingFecBlockList);
     purgeListEntries(&queue->completedFecBlockList);
     queue->pendingFrameDeadlineUs = 0;
+    queue->pendingFrameDeadlinePrecise = false;
+    queue->onTimeDeadlineQueried = false;
 }
 
 static void insertEntryIntoList(PRTPV_QUEUE_LIST list, PRTPV_QUEUE_ENTRY entry) {
@@ -722,6 +736,10 @@ uint64_t RtpvGetPendingFrameDeadlineUs(PRTP_VIDEO_QUEUE queue) {
     return queue->pendingFrameDeadlineUs;
 }
 
+bool RtpvPendingFrameDeadlineIsPrecise(PRTP_VIDEO_QUEUE queue) {
+    return queue->pendingFrameDeadlineUs != 0 && queue->pendingFrameDeadlinePrecise;
+}
+
 bool RtpvExpirePendingFrame(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     if (queue->pendingFrameDeadlineUs == 0 || nowUs < queue->pendingFrameDeadlineUs) {
         return false;
@@ -737,7 +755,8 @@ bool RtpvExpirePendingFrame(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     }
 
     reportFinalFrameFecStatus(queue);
-    if (!completeBlockWithLostPackets(queue, "packet silence")) {
+    if (!completeBlockWithLostPackets(queue, queue->pendingFrameDeadlinePrecise ?
+                                      "on-time deadline" : "packet silence")) {
         return false;
     }
     submitCompletedFrame(queue);
@@ -803,6 +822,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
         queue->pendingFrameDeadlineUs = 0;
+        queue->onTimeDeadlineQueried = false;
         if (queue->pendingFecBlockList.count != 0) {
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
@@ -1002,7 +1022,24 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
             // Only accepted unique packets extend the grace. Do not expire it
             // here: a paused receive thread may still have reordered data in
             // the kernel socket queue, which must be drained first.
-            queue->pendingFrameDeadlineUs = PltGetMicroseconds() + PYROWAVE_PACKET_SILENCE_US;
+            uint64_t nowUs = PltGetMicroseconds();
+            if (!queue->onTimeDeadlineQueried) {
+                queue->onTimeDeadlineQueried = true;
+                queue->onTimeDeadlineUs = reassemblyDeadlineCallback != NULL ?
+                    reassemblyDeadlineCallback(packet->timestamp) : 0;
+            }
+            queue->pendingFrameDeadlineUs = nowUs + PYROWAVE_PACKET_SILENCE_US;
+            queue->pendingFrameDeadlinePrecise = false;
+            if (queue->onTimeDeadlineUs != 0) {
+                uint64_t lateDeadlineUs = nowUs + PYROWAVE_LATE_PACKET_SILENCE_US;
+                if (lateDeadlineUs < queue->onTimeDeadlineUs) {
+                    lateDeadlineUs = queue->onTimeDeadlineUs;
+                }
+                if (lateDeadlineUs < queue->pendingFrameDeadlineUs) {
+                    queue->pendingFrameDeadlineUs = lateDeadlineUs;
+                    queue->pendingFrameDeadlinePrecise = true;
+                }
+            }
         }
 
         // Try to submit this frame. If we haven't received enough packets,
