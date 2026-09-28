@@ -17,15 +17,15 @@
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90
 
-// Optional PyroWave detail has no parity. Give reordered packets a short
-// silence interval, then deliver the usable frame instead of waiting for the
-// next frame to announce that a packet (possibly EOF itself) was lost.
+// After the final data packet of an unprotected PyroWave block arrives, give
+// interior holes a short reorder interval before delivering the usable frame.
+// An absent tail must wait for completion or a successor boundary: a gap
+// between host send batches is not evidence that the remaining packets are lost.
 #define PYROWAVE_PACKET_SILENCE_US 1000
 
-// Once the client's on-time deadline has passed, a short silence is enough
-// evidence that the burst ended; the usual reorder allowance would only make
-// the frame late. A frame still receiving packets is never cut short, so slow
-// delivery stays visible to the client's pacer instead of turning into blur.
+// Once the block's final data packet has arrived and the client's on-time
+// deadline has passed, shorten the reorder allowance for interior holes.
+// This must never authorize completion while the final data packet is absent.
 #define PYROWAVE_LATE_PACKET_SILENCE_US 250
 
 static LiVideoReassemblyDeadlineCallback reassemblyDeadlineCallback;
@@ -749,6 +749,7 @@ bool RtpvExpirePendingFrame(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     queue->pendingFrameDeadlineUs = 0;
     if (!(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ||
             queue->pendingFecBlockList.count == 0 || queue->bufferParityPackets != 0 ||
+            queue->receivedHighestSequenceNumber != queue->bufferHighestSequenceNumber ||
             queue->multiFecCurrentBlockNumber != queue->multiFecLastBlockNumber ||
             !hasCompletePyroWaveCriticalData(queue)) {
         return false;
@@ -1018,7 +1019,12 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         }
 
         if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) && queue->bufferParityPackets == 0 &&
-                queue->multiFecCurrentBlockNumber == queue->multiFecLastBlockNumber) {
+                queue->multiFecCurrentBlockNumber == queue->multiFecLastBlockNumber &&
+                queue->receivedHighestSequenceNumber == queue->bufferHighestSequenceNumber) {
+            // With no parity, the highest valid sequence is the last data packet.
+            // Require that actual packet, not just an EOF flag or a quiet socket,
+            // before deciding that interior detail was lost. This also handles
+            // reordering and 16-bit sequence wrap without another state flag.
             // Only accepted unique packets extend the grace. Do not expire it
             // here: a paused receive thread may still have reordered data in
             // the kernel socket queue, which must be drained first.

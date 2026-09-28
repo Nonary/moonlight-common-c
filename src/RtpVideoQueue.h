@@ -26,7 +26,8 @@ typedef struct _RTP_VIDEO_QUEUE {
     RTPV_QUEUE_LIST completedFecBlockList;
 
     uint64_t bufferFirstRecvTimeUs;
-    // Only a PyroWave final block without parity may have a silence deadline.
+    // Only a PyroWave final block without parity whose final data packet has
+    // arrived may have a silence deadline; an absent tail waits for a boundary.
     uint64_t pendingFrameDeadlineUs;
     // The client's on-time reassembly bound for the current frame (0 = none),
     // queried once per final block. A precise deadline is governed by it.
