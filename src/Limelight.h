@@ -104,6 +104,10 @@ typedef struct _STREAM_CONFIGURATION {
     // Request independent PyroWave compression only after checking host support.
     // Zero preserves the normal intra-only PyroWave stream.
     int pyrowaveCompression;
+
+    // Routed client wired-link speed in Mbps, used by PyroWave host pacing.
+    // Zero means unknown; other codecs do not advertise this value.
+    int pyrowaveLinkMbps;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap

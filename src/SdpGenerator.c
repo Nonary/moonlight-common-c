@@ -448,6 +448,10 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
             if (StreamConfig.pyrowaveCompression) {
                 err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveCompression", "1");
             }
+            if (StreamConfig.pyrowaveLinkMbps > 0) {
+                snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.pyrowaveLinkMbps);
+                err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveLinkMbps", payloadStr);
+            }
         }
         else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "2");
