@@ -108,6 +108,11 @@ typedef struct _STREAM_CONFIGURATION {
     // Routed client wired-link speed in Mbps, used by PyroWave host pacing.
     // Zero means unknown; other codecs do not advertise this value.
     int pyrowaveLinkMbps;
+
+    // Highest frame pace in Mbps that calibration kept within its loss limit.
+    // The host paces PyroWave frames at this rate instead of its default
+    // link headroom. Zero means uncalibrated; only sent for PyroWave.
+    int pyrowavePaceMbps;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap
