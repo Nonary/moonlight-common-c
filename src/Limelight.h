@@ -890,6 +890,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 // Grip/stick touch flags are also authoritative from the first state. No packet size change.
 #define LI_CCAP_SC26_BUTTONS   0x1000 // Vibepollo extension; see *_CLICK_FLAG
 #define LI_CCAP_STEAM_SETTINGS 0x2000 // Applies Steam Controller settings writes via ConnListenerSteamSettings() (Vibepollo extension)
+#define LI_CCAP_STEAM_ATTRIBUTES 0x4000 // Sends the real Steam Controller's firmware attributes via LiSendSteamControllerAttributesEvent() (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
@@ -935,6 +936,50 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 #define LI_BATTERY_STATE_FULL         0x05
 #define LI_BATTERY_PERCENTAGE_UNKNOWN 0xFF
 int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState, uint8_t batteryPercentage);
+
+// Vibepollo extension: the real Steam Controller (2026)'s firmware attributes, read by the client
+// from the controller it is connected to (GET_ATTRIBUTES_VALUES 0x83, GET_DEVICE_INFO 0xF2 sub 0,
+// GET_STRING_ATTRIBUTE 0xAE). A host whose virtual Steam Controller answers Steam's attribute
+// queries echoes them, so Steam sees the real unit's firmware build and offers a firmware update
+// only when the real controller needs one. (Never start that update while streaming: it would
+// target the virtual controller on the host, not the real one.) The host applies a late packet
+// too, so a client may send this after the first input; stock hosts ignore the packet.
+//
+// Which fields of LI_STEAM_CONTROLLER_ATTRIBUTES carry a value read from the controller
+#define LI_SCATTR_FIRMWARE_BUILD_TIME   0x01
+#define LI_SCATTR_BOOTLOADER_BUILD_TIME 0x02
+#define LI_SCATTR_BOARD_REVISION        0x04
+#define LI_SCATTR_CAPABILITIES          0x08
+#define LI_SCATTR_RADIO_FW_BUILD_TIME   0x10
+#define LI_SCATTR_DONGLE_FW_BUILD_TIME  0x20
+#define LI_SCATTR_BUILD_ID              0x40
+#define LI_SCATTR_SERIALS               0x80
+
+// How the client is connected to the real unit (informational)
+#define LI_SCATTR_TRANSPORT_USB  0
+#define LI_SCATTR_TRANSPORT_BLE  1
+#define LI_SCATTR_TRANSPORT_PUCK 2
+
+typedef struct _LI_STEAM_CONTROLLER_ATTRIBUTES {
+    uint8_t  transport;               // LI_SCATTR_TRANSPORT_*
+    uint8_t  validMask;               // LI_SCATTR_* bits
+    uint8_t  reserved[2];             // zero
+    uint32_t firmwareBuildTime;       // GET_ATTRIBUTES tag 4 (unix seconds)
+    uint32_t bootloaderBuildTime;     // tag 10
+    uint32_t boardRevision;           // tag 9
+    uint32_t capabilities;            // tag 2
+    uint32_t radioFirmwareBuildTime;  // tag 5 (0 if absent)
+    uint32_t dongleFirmwareBuildTime; // tag 8 (0 if absent; puck only)
+    char     buildId[16];             // GET_DEVICE_INFO sub 0 build id (12 ASCII chars), NUL padded
+    char     unitSerial[16];          // GET_STRING_ATTRIBUTE tag 1 ("FXA..."), NUL padded
+    char     boardSerial[16];         // GET_STRING_ATTRIBUTE tag 0 ("MXA..."), NUL padded
+} LI_STEAM_CONTROLLER_ATTRIBUTES, *PLI_STEAM_CONTROLLER_ATTRIBUTES;
+
+// Sends the real controller's attributes for a controller previously announced with
+// LiSendControllerArrivalEvent() and LI_CTYPE_STEAM. Reliable, same channel as the arrival event,
+// so it is ordered after it. Strings are truncated to 15 characters, NUL terminated, and
+// non-printable characters become '?'. Only sent to Sunshine-derived hosts; LI_ERR_UNSUPPORTED otherwise.
+int LiSendSteamControllerAttributesEvent(uint8_t controllerNumber, const LI_STEAM_CONTROLLER_ATTRIBUTES* attributes);
 
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before

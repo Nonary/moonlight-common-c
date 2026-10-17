@@ -72,6 +72,7 @@ typedef struct _PACKET_HOLDER {
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
+        SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET steamControllerAttributes;
         NV_UNICODE_PACKET unicode;
     } packet;
 } PACKET_HOLDER, *PPACKET_HOLDER;
@@ -1636,6 +1637,77 @@ int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState,
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
     if (err != LBQ_SUCCESS) {
         LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}
+
+// Copies at most sizeof(dst) - 1 characters, NUL terminates, and replaces anything outside
+// printable ASCII with '?': the host logs these and hands them to a kernel driver.
+static void copyAttributeString(char* dst, size_t dstSize, const char* src) {
+    size_t i;
+
+    memset(dst, 0, dstSize);
+    if (src == NULL) {
+        return;
+    }
+    for (i = 0; i + 1 < dstSize && src[i] != '\0'; i++) {
+        dst[i] = (src[i] >= 0x20 && src[i] <= 0x7E) ? src[i] : '?';
+    }
+}
+
+int LiSendSteamControllerAttributesEvent(uint8_t controllerNumber, const LI_STEAM_CONTROLLER_ATTRIBUTES* attributes) {
+    PPACKET_HOLDER holder;
+    PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET packet;
+    int err;
+
+    if (!initialized) {
+        return -2;
+    }
+
+    if (attributes == NULL) {
+        return -1;
+    }
+
+    // This is a protocol extension only supported with Sunshine-derived hosts
+    if (!IS_SUNSHINE()) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    // Sunshine supports up to 16 controllers
+    controllerNumber %= MAX_GAMEPADS;
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    // Same channel as the arrival event, reliable: the host sees the arrival first
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+
+    packet = &holder->packet.steamControllerAttributes;
+    packet->header.size = BE32(sizeof(SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET) - sizeof(uint32_t));
+    packet->header.magic = LE32(SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC);
+    packet->controllerNumber = controllerNumber;
+    packet->transport = attributes->transport;
+    packet->validMask = attributes->validMask;
+    packet->reserved = 0;
+    packet->firmwareBuildTime = LE32(attributes->firmwareBuildTime);
+    packet->bootloaderBuildTime = LE32(attributes->bootloaderBuildTime);
+    packet->boardRevision = LE32(attributes->boardRevision);
+    packet->capabilities = LE32(attributes->capabilities);
+    packet->radioFirmwareBuildTime = LE32(attributes->radioFirmwareBuildTime);
+    packet->dongleFirmwareBuildTime = LE32(attributes->dongleFirmwareBuildTime);
+    copyAttributeString(packet->buildId, sizeof(packet->buildId), attributes->buildId);
+    copyAttributeString(packet->unitSerial, sizeof(packet->unitSerial), attributes->unitSerial);
+    copyAttributeString(packet->boardSerial, sizeof(packet->boardSerial), attributes->boardSerial);
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);  // interrupted while stopping
         Limelog("Input queue reached maximum size limit\n");
         freePacketHolder(holder);
     }

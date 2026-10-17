@@ -196,4 +196,23 @@ typedef struct _SS_CONTROLLER_BATTERY_PACKET {
     uint8_t zero[1]; // Alignment/reserved
 } SS_CONTROLLER_BATTERY_PACKET, *PSS_CONTROLLER_BATTERY_PACKET;
 
+// Vibepollo extension: the real Steam Controller's firmware attributes (LiSendSteamControllerAttributesEvent)
+#define SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC 0x55000008
+typedef struct _SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET {
+    NV_INPUT_HEADER header;
+    uint8_t controllerNumber;
+    uint8_t transport;                 // LI_SCATTR_TRANSPORT_*
+    uint8_t validMask;                 // LI_SCATTR_* bits
+    uint8_t reserved;                  // zero
+    uint32_t firmwareBuildTime;        // all u32 fields little endian, like the arrival packet
+    uint32_t bootloaderBuildTime;
+    uint32_t boardRevision;
+    uint32_t capabilities;
+    uint32_t radioFirmwareBuildTime;
+    uint32_t dongleFirmwareBuildTime;
+    char buildId[16];                  // NUL padded, printable ASCII
+    char unitSerial[16];
+    char boardSerial[16];
+} SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET, *PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET;
+
 #pragma pack(pop)
