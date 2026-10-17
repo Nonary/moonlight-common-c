@@ -136,6 +136,25 @@ int main(void) {
               "press and release of a physical click are both sent");
     }
 
+    // A failed connection can leave a controller holder queued when teardown frees
+    // it. A new session must not batch its first input into that freed holder.
+    sendState(80, 0, 10, 0);
+    initialized = false;
+    LbqSignalQueueShutdown(&packetHolderFreeList);
+    LbqSignalQueueShutdown(&packetQueue);
+    destroyInputStream();
+    check(initializeInputStream() == 0, "input stream can initialize a second session");
+    bool emptyControllerBatches = true;
+    for (int i = 0; i < MAX_GAMEPADS; ++i) {
+        emptyControllerBatches &= currentQueuedControllerPacket[i] == NULL;
+    }
+    check(emptyControllerBatches, "new session discards every previous controller batch pointer");
+    initialized = true;
+    sendState(90, 0, 20, 0);
+    drain();
+    check(sends == 1 && sent[0].leftTrigger == 90 && LE16(sent[0].leftStickX) == 20,
+          "new session sends its first controller state from a live holder");
+
     initialized = false;
     LbqSignalQueueShutdown(&packetHolderFreeList);
     LbqSignalQueueShutdown(&packetQueue);
