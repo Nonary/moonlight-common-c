@@ -10,7 +10,7 @@ cc=${CC:-cc}
 # System libraries the production sources under test call directly (sockets on Windows).
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) syslibs="-lws2_32 -lwinmm" ;; *) syslibs= ;; esac
 # Match sanitizer flags used to build the library via CFLAGS, when applicable.
-for test in steam_haptic controller_batching; do
+for test in steam_haptic steam_settings controller_batching; do
     extra_flags=
     # Exercise the input producer assertions in debug builds.
     if [ "$test" = controller_batching ]; then extra_flags=-DLC_DEBUG; fi
@@ -21,4 +21,5 @@ for test in steam_haptic controller_batching; do
         -pthread -o "$build/test-$test"
 done
 "$build/test-steam_haptic"
+"$build/test-steam_settings"
 "$build/test-controller_batching"

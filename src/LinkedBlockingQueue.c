@@ -88,6 +88,12 @@ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOC
 
 int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
         bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit, void** displaced) {
+    return LbqOfferQueueItemClassed(queueHead, data, entry, matches, priority, eventLimit, NULL, 0, displaced);
+}
+
+int LbqOfferQueueItemClassed(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
+        bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit,
+        bool (*reserved)(void*), int reservedLimit, void** displaced) {
     bool wasEmpty;
     if (displaced != NULL) *displaced = NULL;
     
@@ -102,18 +108,36 @@ int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLIN
     }
 
     if (priority != NULL) {
-        PLINKED_BLOCKING_QUEUE_ENTRY victim = NULL, firstEvent = NULL;
+        PLINKED_BLOCKING_QUEUE_ENTRY victim = NULL, firstEvent = NULL, firstReserved = NULL;
         bool important = priority(data);
-        int events = 0;
+        // A reserved event has its own bound and is never displaced for an ordinary event.
+        bool isReserved = !important && reserved != NULL && reserved(data);
+        int events = 0, reservedEvents = 0;
         for (PLINKED_BLOCKING_QUEUE_ENTRY p = queueHead->head; p != NULL; p = p->flink) {
-            if (important && matches(data, p->data)) victim = p;
             if (!priority(p->data)) {
-                if (firstEvent == NULL) firstEvent = p;
-                ++events;
+                if (reserved != NULL && reserved(p->data)) {
+                    if (firstReserved == NULL) firstReserved = p;
+                    ++reservedEvents;
+                }
+                else {
+                    if (firstEvent == NULL) firstEvent = p;
+                    ++events;
+                }
+            }
+            else if (important && matches(data, p->data)) {
+                victim = p;
             }
         }
-        if (victim == NULL && (queueHead->currentSize == queueHead->sizeBound ||
-                (!important && eventLimit > 0 && events >= eventLimit))) victim = firstEvent;
+        if (victim == NULL) {
+            if (isReserved && reservedLimit > 0 && reservedEvents >= reservedLimit) victim = firstReserved;
+            else if (!important && !isReserved && eventLimit > 0 && events >= eventLimit) victim = firstEvent;
+            else if (queueHead->currentSize == queueHead->sizeBound) {
+                victim = firstEvent;
+                // Total capacity must honor the same class protection as the
+                // event budget: an ordinary event cannot displace settings.
+                if (victim == NULL && (important || isReserved)) victim = firstReserved;
+            }
+        }
         if (victim != NULL) {
             if (victim->blink) victim->blink->flink = victim->flink;
             else queueHead->head = victim->flink;

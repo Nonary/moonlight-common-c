@@ -548,6 +548,18 @@ typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t
 #define STEAM_HAPTIC_REPORT_MAX 12
 typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length, const uint8_t *report);
 
+// Vibepollo extension: a Steam Controller (2026) settings write the host's virtual controller
+// received on its control channel, for a client that drives the real controller. `command` is
+// 0x87 (SET_SETTINGS_VALUES) with `count` (id, lo, hi) triples in `triples`, at most
+// STEAM_SETTINGS_TRIPLES_MAX per callback (a longer write arrives as several callbacks, in
+// order), or 0x8E (LOAD_DEFAULT_SETTINGS) with count 0. Sent only to clients that set
+// LI_CCAP_STEAM_SETTINGS. The client decides which ids reach its controller.
+#define STEAM_SETTINGS_TRIPLES_MAX 9
+#define STEAM_SETTINGS_PAYLOAD_SIZE (STEAM_SETTINGS_TRIPLES_MAX * 3)
+#define STEAM_SETTINGS_SET_VALUES 0x87
+#define STEAM_SETTINGS_LOAD_DEFAULTS 0x8E
+typedef void(*ConnListenerSteamSettings)(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t *triples);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -564,6 +576,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerControllerHaptics controllerHaptics;
     ConnListenerSteamHaptic steamHaptic;
+    ConnListenerSteamSettings steamSettings;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -876,6 +889,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 // Reports independent physical pad/trigger clicks, including their released state.
 // Grip/stick touch flags are also authoritative from the first state. No packet size change.
 #define LI_CCAP_SC26_BUTTONS   0x1000 // Vibepollo extension; see *_CLICK_FLAG
+#define LI_CCAP_STEAM_SETTINGS 0x2000 // Applies Steam Controller settings writes via ConnListenerSteamSettings() (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
