@@ -798,6 +798,11 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length);
 #define PADDLE4_FLAG  0x080000
 #define TOUCHPAD_FLAG 0x100000 // Touchpad buttons on Sony controllers
 #define MISC_FLAG     0x200000 // Share/Mic/Capture/Mute buttons on various controllers
+// Moonlight extension (Vibepollo + libvirtualgamepad): capacitive grip sensors of the
+// Steam Controller (2026). Not buttons: they say the controller is being held. Sent only
+// by clients that set LI_CCAP_GRIP_SENSE; stock hosts ignore the upper flag bits.
+#define LEFT_GRIP_TOUCH_FLAG  0x400000
+#define RIGHT_GRIP_TOUCH_FLAG 0x800000
 
 // This function queues a controller event to be sent to the remote server. It will
 // be seen by the computer as the first controller.
@@ -846,6 +851,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_BATTERY_STATE   0x40 // Reports battery state via LiSendControllerBatteryEvent()
 #define LI_CCAP_RGB_LED         0x80 // Can set RGB LED state via ConnListenerSetControllerLED()
 #define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
+#define LI_CCAP_GRIP_SENSE     0x200 // Reports capacitive grip touch via LEFT/RIGHT_GRIP_TOUCH_FLAG (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
