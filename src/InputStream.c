@@ -97,6 +97,10 @@ static struct {
 int initializeInputStream(void) {
     memcpy(currentAesIv, StreamConfig.remoteInputAesIv, sizeof(currentAesIv));
 
+    // Teardown frees any holders still queued after a failed/stopped session.
+    // None of those controller batches may survive into this session.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+
     // Set a high maximum queue size limit to ensure input isn't dropped
     // while the input send thread is blocked for short periods.
     LbqInitializeLinkedBlockingQueue(&packetQueue, MAX_QUEUED_INPUT_PACKETS);
@@ -1008,6 +1012,12 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         return -2;
     }
 
+    // A signed remainder can remain negative and index before the batch table.
+    if (controllerNumber < 0) {
+        LC_ASSERT(controllerNumber >= 0);
+        return -3;
+    }
+
     // HACK: We previously used a short for the buttonFlags argument, but we switched to an
     // int to support additional buttons with Sunshine. Unfortunately, some clients still pass
     // a short, which gets sign extended to an int. This causes all the new button flags to be
@@ -1540,8 +1550,8 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
     }
 
     // Check for valid motion type values
-    if (motionType - 1 >= MAX_MOTION_EVENTS) {
-        LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+    if (motionType < 1 || motionType > MAX_MOTION_EVENTS) {
+        LC_ASSERT(motionType >= 1 && motionType <= MAX_MOTION_EVENTS);
         return -3;
     }
 
