@@ -1049,10 +1049,16 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         // We do not support batching with the legacy controller packet format
         LC_ASSERT(AppVersionQuad[0] > 3);
 
-        // If this new packet has different button flags, end the batch to ensure the
-        // host receives the exact axis values present at the time of the button press.
+        // Preserve button changes and triggers leaving/returning to rest. Otherwise
+        // a press and release queued before the sender runs collapse into a release.
+        // The virtual Steam Controller also synthesizes a full-pull click at 0xF0.
+        // Preserve that edge too; travel within each range can still be coalesced.
         if (holder->packet.multiController.buttonFlags != LE16((short)buttonFlags) ||
-            holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0)) {
+            holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0) ||
+            (holder->packet.multiController.leftTrigger == 0) != (leftTrigger == 0) ||
+            (holder->packet.multiController.rightTrigger == 0) != (rightTrigger == 0) ||
+            (holder->packet.multiController.leftTrigger >= 0xF0) != (leftTrigger >= 0xF0) ||
+            (holder->packet.multiController.rightTrigger >= 0xF0) != (rightTrigger >= 0xF0)) {
             // Pretend there wasn't a currently queued controller packet
             holder = NULL;
         }

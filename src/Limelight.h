@@ -816,6 +816,12 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length);
 // LI_CCAP_STICK_TOUCH; without it the host derives stick touch from deflection.
 #define LEFT_STICK_TOUCH_FLAG  0x1000000
 #define RIGHT_STICK_TOUCH_FLAG 0x2000000
+// Physical SC2026 pad and trigger clicks (LI_CCAP_SC26_BUTTONS). Keep TOUCHPAD_FLAG
+// alongside the per-pad bits for hosts that predate this extension.
+#define LEFT_PAD_CLICK_FLAG      0x04000000
+#define RIGHT_PAD_CLICK_FLAG     0x08000000
+#define LEFT_TRIGGER_CLICK_FLAG  0x10000000
+#define RIGHT_TRIGGER_CLICK_FLAG 0x20000000
 
 // This function queues a controller event to be sent to the remote server. It will
 // be seen by the computer as the first controller.
@@ -867,6 +873,9 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_GRIP_SENSE     0x200 // Reports capacitive grip touch via LEFT/RIGHT_GRIP_TOUCH_FLAG (Vibepollo extension)
 #define LI_CCAP_STICK_TOUCH    0x400 // Reports capacitive stick touch via LEFT/RIGHT_STICK_TOUCH_FLAG (Vibepollo extension)
 #define LI_CCAP_STEAM_HAPTIC   0x800 // Replays Steam Controller haptic reports via ConnListenerSteamHaptic() (Vibepollo extension)
+// Reports independent physical pad/trigger clicks, including their released state.
+// Grip/stick touch flags are also authoritative from the first state. No packet size change.
+#define LI_CCAP_SC26_BUTTONS   0x1000 // Vibepollo extension; see *_CLICK_FLAG
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
