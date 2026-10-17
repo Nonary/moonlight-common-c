@@ -540,6 +540,14 @@ typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r
 // Only advertise LI_CCAP_HAPTICS_PCM for controllers with a working renderer.
 typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames);
 
+// Vibepollo extension: a Steam Controller (2026) haptic output report the host's virtual
+// controller received, for a client that drives the real controller's pads. `report` is the
+// report as the host wrote it, its id first (0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO
+// tone, 0x84 log sweep, 0x85 script), `length` bytes long. Sent only to clients that set
+// LI_CCAP_STEAM_HAPTIC; such a client gets no ConnListenerRumble() for these reports.
+#define STEAM_HAPTIC_REPORT_MAX 12
+typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length, const uint8_t *report);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -555,6 +563,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerControllerHaptics controllerHaptics;
+    ConnListenerSteamHaptic steamHaptic;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -857,6 +866,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
 #define LI_CCAP_GRIP_SENSE     0x200 // Reports capacitive grip touch via LEFT/RIGHT_GRIP_TOUCH_FLAG (Vibepollo extension)
 #define LI_CCAP_STICK_TOUCH    0x400 // Reports capacitive stick touch via LEFT/RIGHT_STICK_TOUCH_FLAG (Vibepollo extension)
+#define LI_CCAP_STEAM_HAPTIC   0x800 // Replays Steam Controller haptic reports via ConnListenerSteamHaptic() (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 

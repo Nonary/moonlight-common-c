@@ -83,7 +83,13 @@ int LbqGetItemCount(PLINKED_BLOCKING_QUEUE queueHead) {
 }
 
 int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
+    return LbqOfferQueueItemPriority(queueHead, data, entry, NULL, NULL, 0, NULL);
+}
+
+int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
+        bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit, void** displaced) {
     bool wasEmpty;
+    if (displaced != NULL) *displaced = NULL;
     
     entry->flink = NULL;
     entry->data = data;
@@ -93,6 +99,29 @@ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOC
     if (queueHead->shutdown || queueHead->draining) {
         PltUnlockMutex(&queueHead->mutex);
         return LBQ_INTERRUPTED;
+    }
+
+    if (priority != NULL) {
+        PLINKED_BLOCKING_QUEUE_ENTRY victim = NULL, firstEvent = NULL;
+        bool important = priority(data);
+        int events = 0;
+        for (PLINKED_BLOCKING_QUEUE_ENTRY p = queueHead->head; p != NULL; p = p->flink) {
+            if (important && matches(data, p->data)) victim = p;
+            if (!priority(p->data)) {
+                if (firstEvent == NULL) firstEvent = p;
+                ++events;
+            }
+        }
+        if (victim == NULL && (queueHead->currentSize == queueHead->sizeBound ||
+                (!important && eventLimit > 0 && events >= eventLimit))) victim = firstEvent;
+        if (victim != NULL) {
+            if (victim->blink) victim->blink->flink = victim->flink;
+            else queueHead->head = victim->flink;
+            if (victim->flink) victim->flink->blink = victim->blink;
+            else queueHead->tail = victim->blink;
+            --queueHead->currentSize;
+            *displaced = victim->data;
+        }
     }
 
     if (queueHead->currentSize == queueHead->sizeBound) {
@@ -158,6 +187,11 @@ int LbqPeekQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
 }
 
 int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
+    return LbqPollQueueElementMatching(queueHead, data, NULL, NULL);
+}
+
+int LbqPollQueueElementMatching(PLINKED_BLOCKING_QUEUE queueHead, void** data,
+        bool (*matches)(void*, void*), void* context) {
     PLINKED_BLOCKING_QUEUE_ENTRY entry;
 
     PltLockMutex(&queueHead->mutex);
@@ -176,6 +210,11 @@ int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
             PltUnlockMutex(&queueHead->mutex);
             return LBQ_NO_ELEMENT;
         }
+    }
+
+    if (matches != NULL && !matches(context, queueHead->head->data)) {
+        PltUnlockMutex(&queueHead->mutex);
+        return LBQ_NO_ELEMENT;
     }
 
     entry = queueHead->head;
