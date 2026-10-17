@@ -803,6 +803,10 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length);
 // by clients that set LI_CCAP_GRIP_SENSE; stock hosts ignore the upper flag bits.
 #define LEFT_GRIP_TOUCH_FLAG  0x400000
 #define RIGHT_GRIP_TOUCH_FLAG 0x800000
+// Capacitive touch of its sticks (held, not pressed). Sent only by clients that set
+// LI_CCAP_STICK_TOUCH; without it the host derives stick touch from deflection.
+#define LEFT_STICK_TOUCH_FLAG  0x1000000
+#define RIGHT_STICK_TOUCH_FLAG 0x2000000
 
 // This function queues a controller event to be sent to the remote server. It will
 // be seen by the computer as the first controller.
@@ -852,6 +856,7 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_RGB_LED         0x80 // Can set RGB LED state via ConnListenerSetControllerLED()
 #define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
 #define LI_CCAP_GRIP_SENSE     0x200 // Reports capacitive grip touch via LEFT/RIGHT_GRIP_TOUCH_FLAG (Vibepollo extension)
+#define LI_CCAP_STICK_TOUCH    0x400 // Reports capacitive stick touch via LEFT/RIGHT_STICK_TOUCH_FLAG (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
