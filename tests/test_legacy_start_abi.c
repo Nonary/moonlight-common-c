@@ -44,10 +44,10 @@
 
 extern ConnListenerControllerSpeakerPcm ControllerSpeakerPcmCallback;
 
-static void speakerCallback(uint16_t controllerNumber, uint32_t generation,
+static void speakerCallback(uint16_t controllerNumber, uint64_t speakerOwner, uint32_t generation,
                             uint32_t sequence, uint64_t samplePosition,
                             uint16_t flags, const uint8_t* pcm, uint16_t frames) {
-    (void)controllerNumber;
+    (void)controllerNumber; (void)speakerOwner;
     (void)generation;
     (void)sequence;
     (void)samplePosition;

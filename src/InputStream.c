@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "ControllerSpeakerPcm.h"
 
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
@@ -69,6 +70,7 @@ typedef struct _PACKET_HOLDER {
         SS_TOUCH_PACKET touch;
         SS_PEN_PACKET pen;
         SS_CONTROLLER_ARRIVAL_PACKET controllerArrival;
+        uint8_t controllerSpeakerBinding[ML_SPEAKER_BIND_SIZE];
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
@@ -1421,6 +1423,36 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     }
 
     return err;
+}
+
+int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
+    PPACKET_HOLDER holder;
+    int err;
+    if (!initialized) return -2;
+    if (controllerNumber >= MAX_GAMEPADS) return -1;
+    if (IS_SUNSHINE() && ControllerSpeakerPcmCallback && speakerOwner &&
+        type == LI_CTYPE_PS && (capabilities & LI_CCAP_PS_SPEAKER_PCM)) {
+        holder = allocatePacketHolder(0);
+        if (!holder) return -1;
+        holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
+        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        if (!MlSpeakerPcmBuildBinding(holder->packet.controllerSpeakerBinding,
+                                     ML_SPEAKER_BIND_SIZE, controllerNumber, speakerOwner)) {
+            freePacketHolder(holder);
+            return -1;
+        }
+        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        if (err != LBQ_SUCCESS) {
+            freePacketHolder(holder);
+            return err;
+        }
+    } else if (type == LI_CTYPE_PS) {
+        // Missing binding must never accidentally advertise speaker output.
+        capabilities &= ~LI_CCAP_PS_SPEAKER_PCM;
+    }
+    return LiSendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
+                                       supportedButtonFlags, capabilities);
 }
 
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,

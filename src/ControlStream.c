@@ -1314,7 +1314,7 @@ static void controlReceiveThreadFunc(void* context) {
                 if (packetLength >= (int)sizeof(*ctlHdr) &&
                     MlSpeakerPcmValidate(payload, packetLength - sizeof(*ctlHdr)) &&
                     ControllerSpeakerPcmCallback) {
-                    ControllerSpeakerPcmCallback(MlSpeakerRead16(payload + 2),
+                    ControllerSpeakerPcmCallback(MlSpeakerRead16(payload + 2), MlSpeakerRead64(payload + 24),
                         MlSpeakerRead32(payload + 4), MlSpeakerRead32(payload + 8),
                         MlSpeakerRead64(payload + 12), MlSpeakerRead16(payload + 22),
                         payload + ML_SPEAKER_PCM_HEADER_SIZE, MlSpeakerRead16(payload + 20));
