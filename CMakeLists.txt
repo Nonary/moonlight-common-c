@@ -7,6 +7,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 option(USE_MBEDTLS "Use MbedTLS instead of OpenSSL" OFF)
 option(CODE_ANALYSIS "Run code analysis during compilation" OFF)
+option(BUILD_ABI_REGRESSION_TESTS "Build public callback ABI regression tests" OFF)
 
 SET(CMAKE_C_STANDARD 11)
 
@@ -117,3 +118,21 @@ target_include_directories(moonlight-common-c SYSTEM PRIVATE
 )
 
 target_compile_definitions(moonlight-common-c PRIVATE HAS_SOCKLEN_T)
+
+if (BUILD_ABI_REGRESSION_TESTS)
+  enable_testing()
+
+  add_executable(test_legacy_callback_abi tests/test_legacy_callback_abi.c)
+  target_include_directories(test_legacy_callback_abi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/legacy_abi)
+  target_link_libraries(test_legacy_callback_abi PRIVATE moonlight-common-c)
+  add_test(NAME legacy_callback_abi COMMAND test_legacy_callback_abi)
+
+  add_executable(test_legacy_start_abi tests/test_legacy_start_abi.c)
+  target_include_directories(test_legacy_start_abi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(test_legacy_start_abi PRIVATE moonlight-common-c)
+  add_test(NAME legacy_start_abi COMMAND test_legacy_start_abi)
+
+  add_executable(test_connection_listener_callbacks_v1_layout tests/test_connection_listener_callbacks_v1_layout.c)
+  target_include_directories(test_connection_listener_callbacks_v1_layout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  add_test(NAME connection_listener_callbacks_v1_layout COMMAND test_connection_listener_callbacks_v1_layout)
+endif()
