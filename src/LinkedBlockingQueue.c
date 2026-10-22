@@ -133,14 +133,17 @@ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOC
 // The queue lock covers both capacity admission and the entire ordered batch.
 // Consumers and other producers can never observe or insert a partial batch.
 int LbqOfferQueueItems(PLINKED_BLOCKING_QUEUE queueHead, void* const* data,
-                      PLINKED_BLOCKING_QUEUE_ENTRY const* entries, int count) {
+                      PLINKED_BLOCKING_QUEUE_ENTRY const* entries, int count, int headroom) {
     bool wasEmpty;
     PltLockMutex(&queueHead->mutex);
     if (queueHead->shutdown || queueHead->draining) {
         PltUnlockMutex(&queueHead->mutex);
         return LBQ_INTERRUPTED;
     }
-    if (count <= 0 || count > queueHead->sizeBound - queueHead->currentSize) {
+    // Headroom is checked atomically with admission, but is not reserved.
+    // A later producer may consume it as soon as this mutex is released.
+    if (count <= 0 || headroom < 0 || headroom > queueHead->sizeBound - queueHead->currentSize ||
+        count > queueHead->sizeBound - queueHead->currentSize - headroom) {
         PltUnlockMutex(&queueHead->mutex);
         return LBQ_BOUND_EXCEEDED;
     }

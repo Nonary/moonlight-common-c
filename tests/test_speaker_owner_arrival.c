@@ -1,6 +1,14 @@
 // Exercise the production input API and real queue without starting its sender.
 // Including this translation unit exposes only queue inspection, not a mock path.
 #include <stdlib.h>
+#include <stdatomic.h>
+#include "../src/LinkedBlockingQueue.h"
+static int inputTestOffer(PLINKED_BLOCKING_QUEUE queue, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry);
+static int observeUnadmittedAlias;
+static atomic_int pauseControllerOffer;
+static PLT_EVENT offerPaused, releaseOffer;
+static int sawUnadmittedAlias;
+#define LbqOfferQueueItem inputTestOffer
 static int failAllocationAfter = -1;
 static void* inputTestMalloc(size_t bytes) {
     if (failAllocationAfter == 0) { failAllocationAfter = -1; return NULL; }
@@ -10,6 +18,20 @@ static void* inputTestMalloc(size_t bytes) {
 #define malloc inputTestMalloc
 #include "../src/InputStream.c"
 #undef malloc
+#undef LbqOfferQueueItem
+static int inputTestOffer(PLINKED_BLOCKING_QUEUE queue, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
+    if (observeUnadmittedAlias && queue == &packetQueue) {
+        PPACKET_HOLDER holder = data;
+        if (LE32(holder->packet.header.magic) == MULTI_CONTROLLER_MAGIC_GEN5)
+            sawUnadmittedAlias |= currentQueuedControllerPacket[3] == holder;
+        if (LE32(holder->packet.header.magic) == MULTI_CONTROLLER_MAGIC_GEN5 &&
+            atomic_exchange(&pauseControllerOffer, 0)) {
+            PltSetEvent(&offerPaused);
+            PltWaitForEvent(&releaseOffer);
+        }
+    }
+    return LbqOfferQueueItem(queue, data, entry);
+}
 #include <stdio.h>
 
 static void speaker(uint16_t slot, uint64_t owner, uint32_t generation,
@@ -58,7 +80,7 @@ static void offerPair(void* opaque) {
     void* data[] = {&race->entries[0], &race->entries[1]};
     PLINKED_BLOCKING_QUEUE_ENTRY entries[] = {&race->entries[0], &race->entries[1]};
     PltWaitForEvent(&race->start);
-    race->result = LbqOfferQueueItems(&race->queue, data, entries, 2);
+    race->result = LbqOfferQueueItems(&race->queue, data, entries, 2, 0);
 }
 static int listSize(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
     int count = 0;
@@ -89,6 +111,63 @@ static int testOfferRaces(void) {
     return 0;
 }
 
+typedef struct { PLT_EVENT started; int result; short axis; } controller_race;
+static void controllerUpdate(void* opaque) {
+    controller_race* race = opaque;
+    PltSetEvent(&race->started);
+    race->result = LiSendMultiControllerEvent(3, 8, 0, 0, 0, race->axis, 0, 0, 0);
+}
+static int testControllerAdmission(void) {
+    controller_race first = {.axis = 11}, second = {.axis = 22};
+    PLT_THREAD a, b;
+    CHECK(PltCreateEvent(&offerPaused) == 0 && PltCreateEvent(&releaseOffer) == 0);
+    CHECK(PltCreateEvent(&first.started) == 0 && PltCreateEvent(&second.started) == 0);
+    for (int i = 0; i < 150; ++i) {
+        PPACKET_HOLDER filler = allocatePacketHolder(0);
+        CHECK(filler && LbqOfferQueueItem(&packetQueue, filler, &filler->entry) == LBQ_SUCCESS);
+    }
+    observeUnadmittedAlias = 1;
+    atomic_store(&pauseControllerOffer, 1);
+    CHECK(PltCreateThread("mc-first", controllerUpdate, &first, &a) == 0);
+    PltWaitForEvent(&offerPaused);
+    CHECK(PltCreateThread("mc-overlap", controllerUpdate, &second, &b) == 0);
+    PltWaitForEvent(&second.started);
+    // The deterministic assertion is made at the actual admission boundary.
+    // This delay also exercises the second caller overlapping the paused offer.
+    PltSleepMs(10);
+    PltSetEvent(&releaseOffer);
+    PltJoinThread(&a); PltJoinThread(&b);
+    if (sawUnadmittedAlias) fprintf(stderr, "Overlapping rejected offers returned %d and %d\n", first.result, second.result);
+    CHECK(!sawUnadmittedAlias);
+    CHECK(first.result == LBQ_BOUND_EXCEEDED && second.result == LBQ_BOUND_EXCEEDED);
+    CHECK(currentQueuedControllerPacket[3] == NULL);
+    PPACKET_HOLDER packet;
+    while ((packet = take()) != NULL) free(packet);
+    // Successful admission remains batchable, with the latest axis retained.
+    CHECK(LiSendMultiControllerEvent(3, 8, 0, 0, 0, 11, 0, 0, 0) == LBQ_SUCCESS);
+    packet = currentQueuedControllerPacket[3];
+    CHECK(packet && LbqGetItemCount(&packetQueue) == 1);
+    CHECK(LiSendMultiControllerEvent(3, 8, 0, 0, 0, 22, 0, 0, 0) == LBQ_SUCCESS);
+    CHECK(currentQueuedControllerPacket[3] == packet && LbqGetItemCount(&packetQueue) == 1);
+    CHECK(LE16(packet->packet.multiController.leftStickX) == 22);
+    for (int i = 0; i < 149; ++i) {
+        PPACKET_HOLDER filler = allocatePacketHolder(0);
+        CHECK(filler && LbqOfferQueueItem(&packetQueue, filler, &filler->entry) == LBQ_SUCCESS);
+    }
+    // A rejected new button batch must not erase an older admitted alias.
+    CHECK(LiSendMultiControllerEvent(3, 8, 1, 0, 0, 99, 0, 0, 0) == LBQ_BOUND_EXCEEDED);
+    CHECK(currentQueuedControllerPacket[3] == packet);
+    CHECK(LiSendMultiControllerEvent(3, 8, 0, 0, 0, 33, 0, 0, 0) == LBQ_SUCCESS);
+    CHECK(LE16(packet->packet.multiController.leftStickX) == 33);
+    CHECK(take() == packet);
+    currentQueuedControllerPacket[3] = NULL;
+    free(packet);
+    while ((packet = take()) != NULL) free(packet);
+    PltCloseEvent(&offerPaused); PltCloseEvent(&releaseOffer);
+    PltCloseEvent(&first.started); PltCloseEvent(&second.started);
+    return 0;
+}
+
 int main(void) {
     CHECK(testOfferRaces() == 0);
     AppVersionQuad[0] = 7; AppVersionQuad[1] = 1; AppVersionQuad[2] = 500; AppVersionQuad[3] = -1;
@@ -96,6 +175,7 @@ int main(void) {
     CHECK(initializeInputStream() == 0);
     initialized = true;
     ControllerSpeakerPcmCallback = speaker;
+    CHECK(testControllerAdmission() == 0);
     CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
           LI_CCAP_PS_SPEAKER_PCM, UINT64_MAX) == 0);
     PPACKET_HOLDER binding = take();
@@ -124,6 +204,7 @@ int main(void) {
 
     // At the queue boundary, ordinary controller arrival takes priority over
     // optional speaker binding. No binding may be left without its arrival.
+    observeUnadmittedAlias = 1;
     for (int occupied = 147; occupied <= 150; ++occupied) {
         for (int i = 0; i < occupied; ++i) {
             PPACKET_HOLDER filler = allocatePacketHolder(0);
@@ -132,10 +213,10 @@ int main(void) {
         }
         int result = LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
                         LI_CCAP_PS_SPEAKER_PCM, 100 + occupied);
-        CHECK(result == (occupied == 147 ? LBQ_SUCCESS : LBQ_BOUND_EXCEEDED));
+        CHECK(result == (occupied <= 148 ? LBQ_SUCCESS : LBQ_BOUND_EXCEEDED));
         CHECK(LbqGetItemCount(&packetQueue) == 150);
         for (int i = 0; i < occupied; ++i) free(take());
-        if (occupied <= 148) {
+        if (occupied == 147) {
             binding = take(); arrival = take();
             CHECK(binding && arrival);
             CHECK(MlSpeakerRead32(binding->packet.controllerSpeakerBinding + 4) == ML_SPEAKER_BIND_MAGIC);
@@ -144,14 +225,21 @@ int main(void) {
             CHECK(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM);
             free(binding); free(arrival);
             if (occupied == 147) free(take());
-        } else if (occupied == 149) {
+        } else if (occupied <= 149) {
             arrival = take();
             CHECK(arrival && LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
             CHECK(!(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM));
             free(arrival);
+            if (occupied == 148) {
+                fallback = take();
+                CHECK(fallback && LE32(fallback->packet.header.magic) == MULTI_CONTROLLER_MAGIC_GEN5);
+                CHECK(currentQueuedControllerPacket[3] == fallback);
+                free(fallback);
+            }
         }
         CHECK(!take());
-        if (occupied >= 148) CHECK(currentQueuedControllerPacket[3] == NULL);
+        CHECK(!sawUnadmittedAlias);
+        if (occupied >= 149) CHECK(currentQueuedControllerPacket[3] == NULL);
         memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
         // Capacity recovery must not overwrite a new arrival via a cached,
         // rejected MC holder returned to the allocation free list.

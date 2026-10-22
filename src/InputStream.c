@@ -1131,43 +1131,28 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         holder->packet.multiController.tailA = LE16(MC_TAIL_A);
         holder->packet.multiController.buttonFlags2 = IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0;
         holder->packet.multiController.tailB = LE16(MC_TAIL_B);
+    }
 
-        if (enqueueHolder) {
-            // Make this new packet holder the current enqueued packet
+    if (enqueueHolder) {
+        // Keep the batching mutex through admission. Publishing an alias before
+        // this succeeds lets another sender acknowledge an update to a holder
+        // that can still be rejected by the queue. The queue consumer releases
+        // its queue mutex before acquiring batchedInputMutex.
+        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        if (err == LBQ_SUCCESS && AppVersionQuad[0] != 3) {
             currentQueuedControllerPacket[controllerNumber] = holder;
         }
     }
-
-    // We can unlock the batched input mutex before enqueuing the new holder because
-    // the input thread only cares if currentQueuedControllerPacket is equal to the
-    // holder it's currently processing. Since it cannot be processing the holder
-    // until we enqueue it, there's no risk here of it processing/freeing the
-    // holder when we're still touching it.
-    //
-    // Unlocking early saves a context switch in the common case where the newly
-    // queued packet wakes up the input thread which then immediately blocks on
-    // the batched input mutex until this thread runs again to release it.
+    else {
+        // The packet holder we updated was already admitted.
+        err = 0;
+    }
     PltUnlockMutex(&batchedInputMutex);
 
-    if (enqueueHolder) {
-        // Enqueue the new packet holder
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
-            Limelog("Input queue rejected controller packet\n");
-            // A rejected holder is not queued. Remove its batching alias before
-            // recycling it, or a later arrival can reuse this memory and then
-            // be overwritten by the next MC fallback through the stale alias.
-            PltLockMutex(&batchedInputMutex);
-            if (currentQueuedControllerPacket[controllerNumber] == holder)
-                currentQueuedControllerPacket[controllerNumber] = NULL;
-            PltUnlockMutex(&batchedInputMutex);
-            freePacketHolder(holder);
-        }
-    }
-    else {
-        // The packet holder we updated was already enqueued
-        err = 0;
+    if (enqueueHolder && err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
+        Limelog("Input queue rejected controller packet\n");
+        freePacketHolder(holder);
     }
 
     return err;
@@ -1473,7 +1458,9 @@ static int sendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeG
         err = LBQ_BOUND_EXCEEDED;
         if (speakerOwner) {
             // Allocate the essential arrival first. The optional binding must
-            // never consume the last queue slot or survive a failed arrival.
+            // never crowd out the legacy MC fallback when two slots fit, or
+            // survive a failed arrival. Check one extra slot of headroom in
+            // the same queue lock as pair admission; this is not a reservation.
             PPACKET_HOLDER binding = allocatePacketHolder(0);
             if (binding) {
                 binding->channelId = holder->channelId;
@@ -1482,12 +1469,12 @@ static int sendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeG
                                         ML_SPEAKER_BIND_SIZE, controllerNumber, speakerOwner);
                 void* packets[] = {binding, holder};
                 PLINKED_BLOCKING_QUEUE_ENTRY entries[] = {&binding->entry, &holder->entry};
-                err = LbqOfferQueueItems(&packetQueue, packets, entries, 2);
+                err = LbqOfferQueueItems(&packetQueue, packets, entries, 2, 1);
                 if (err != LBQ_SUCCESS) freePacketHolder(binding);
             }
             if (err == LBQ_BOUND_EXCEEDED) {
                 // No binding was published. Preserve ordinary controller input
-                // when only one slot (or one allocation) is available.
+                // when only one/two slots (or one allocation) are available.
                 holder->packet.controllerArrival.capabilities =
                     LE16(capabilities & ~LI_CCAP_PS_SPEAKER_PCM);
             }
