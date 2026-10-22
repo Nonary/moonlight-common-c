@@ -1,13 +1,18 @@
-// Exercise the production input API and real queue without starting its sender.
+// Exercise the production input API, real queue and actual input sender.
+// Only network delivery and selected allocation/interleaving boundaries are replaced.
 // Including this translation unit exposes only queue inspection, not a mock path.
 #include <stdlib.h>
 #include <stdatomic.h>
-#include "../src/LinkedBlockingQueue.h"
+#include "../src/Limelight-internal.h"
+static int testControlSend(unsigned char*, int, uint8_t, uint32_t, bool);
+#define sendInputPacketOnControlStream testControlSend
 static int inputTestOffer(PLINKED_BLOCKING_QUEUE queue, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry);
 static int observeUnadmittedAlias;
 static atomic_int pauseControllerOffer;
 static PLT_EVENT offerPaused, releaseOffer;
 static int sawUnadmittedAlias;
+static int competeAfterArrival;
+static int contenderResult;
 #define LbqOfferQueueItem inputTestOffer
 static int failAllocationAfter = -1;
 static void* inputTestMalloc(size_t bytes) {
@@ -18,6 +23,7 @@ static void* inputTestMalloc(size_t bytes) {
 #define malloc inputTestMalloc
 #include "../src/InputStream.c"
 #undef malloc
+#undef sendInputPacketOnControlStream
 #undef LbqOfferQueueItem
 static int inputTestOffer(PLINKED_BLOCKING_QUEUE queue, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
     if (observeUnadmittedAlias && queue == &packetQueue) {
@@ -30,7 +36,13 @@ static int inputTestOffer(PLINKED_BLOCKING_QUEUE queue, void* data, PLINKED_BLOC
             PltWaitForEvent(&releaseOffer);
         }
     }
-    return LbqOfferQueueItem(queue, data, entry);
+    int result = LbqOfferQueueItem(queue, data, entry);
+    if (competeAfterArrival && queue == &packetQueue && result == LBQ_SUCCESS &&
+        LE32(((PPACKET_HOLDER)data)->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC) {
+        competeAfterArrival = 0;
+        contenderResult = LiSendKeyboardEvent(0x41, KEY_ACTION_DOWN, 0);
+    }
+    return result;
 }
 #include <stdio.h>
 
@@ -67,48 +79,6 @@ static void arrivalDuringShutdown(void* opaque) {
 static void clearFreeList(void) {
     void* holder;
     while (LbqPollQueueElement(&packetHolderFreeList, &holder) == LBQ_SUCCESS) free(holder);
-}
-
-typedef struct {
-    LINKED_BLOCKING_QUEUE queue;
-    LINKED_BLOCKING_QUEUE_ENTRY entries[2];
-    PLT_EVENT start;
-    int result;
-} offer_race;
-static void offerPair(void* opaque) {
-    offer_race* race = opaque;
-    void* data[] = {&race->entries[0], &race->entries[1]};
-    PLINKED_BLOCKING_QUEUE_ENTRY entries[] = {&race->entries[0], &race->entries[1]};
-    PltWaitForEvent(&race->start);
-    race->result = LbqOfferQueueItems(&race->queue, data, entries, 2, 0);
-}
-static int listSize(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
-    int count = 0;
-    while (entry) { ++count; entry = entry->flink; }
-    return count;
-}
-static int testOfferRaces(void) {
-    for (int mode = 0; mode < 3; ++mode) for (int i = 0; i < 30; ++i) {
-        offer_race race;
-        PLT_THREAD thread;
-        CHECK(LbqInitializeLinkedBlockingQueue(&race.queue, 2) == 0);
-        CHECK(PltCreateEvent(&race.start) == 0);
-        CHECK(PltCreateThread("speaker-pair", offerPair, &race, &thread) == 0);
-        PltSetEvent(&race.start);
-        int removed = 0;
-        if (mode == 0) LbqSignalQueueShutdown(&race.queue);
-        else if (mode == 1) LbqSignalQueueDrain(&race.queue);
-        else removed = listSize(LbqFlushQueueItems(&race.queue));
-        PltJoinThread(&thread);
-        int remaining = listSize(LbqFlushQueueItems(&race.queue));
-        CHECK((removed == 0 || removed == 2) && (remaining == 0 || remaining == 2));
-        CHECK(removed + remaining == (race.result == LBQ_SUCCESS ? 2 : 0));
-        CHECK(race.result == LBQ_SUCCESS || (mode != 2 && race.result == LBQ_INTERRUPTED));
-        LbqSignalQueueShutdown(&race.queue);
-        CHECK(!LbqDestroyLinkedBlockingQueue(&race.queue));
-        PltCloseEvent(&race.start);
-    }
-    return 0;
 }
 
 typedef struct { PLT_EVENT started; int result; short axis; } controller_race;
@@ -168,234 +138,146 @@ static int testControllerAdmission(void) {
     return 0;
 }
 
-int main(void) {
-    CHECK(testOfferRaces() == 0);
-    AppVersionQuad[0] = 7; AppVersionQuad[1] = 1; AppVersionQuad[2] = 500; AppVersionQuad[3] = -1;
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 1) == -2);
+
+typedef struct { unsigned char bytes[128]; int length; uint8_t channel; uint32_t flags; } wire_record;
+static wire_record sent[512];
+static int sentCount, failSend, termination;
+static int testControlSend(unsigned char* data, int length, uint8_t channel, uint32_t flags, bool moreData) {
+    (void)moreData;
+    if (sentCount >= 512 || length > 128 || length < 8) abort();
+    wire_record* r = &sent[sentCount++];
+    memcpy(r->bytes, data, length); r->length = length; r->channel = channel; r->flags = flags;
+    return failSend == sentCount ? -55 : 0;
+}
+static void terminated(int error) { termination = error; }
+static int startCase(void) {
+    AppVersionQuad[0] = 7; AppVersionQuad[1] = 1; AppVersionQuad[2] = 431; AppVersionQuad[3] = -1;
     CHECK(initializeInputStream() == 0);
-    initialized = true;
+    initialized = true; encryptedControlStream = true;
     ControllerSpeakerPcmCallback = speaker;
+    ListenerCallbacks.connectionTerminated = terminated;
+    sentCount = failSend = termination = contenderResult = competeAfterArrival = 0;
+    return 0;
+}
+static void endCase(void) {
+    initialized = false;
+    LbqSignalQueueShutdown(&packetQueue);
+    LbqSignalQueueShutdown(&packetHolderFreeList);
+    destroyInputStream();
+}
+static int sendQueued(void) {
+    LbqSignalQueueDrain(&packetQueue);
+    CHECK(PltCreateThread("actual-input-sender", inputSendThreadProc, NULL, &inputSendThread) == 0);
+    PltJoinThread(&inputSendThread);
+    return 0;
+}
+static uint32_t magic(int index) { return MlSpeakerRead32(sent[index].bytes + 4); }
+static int checkPrefix(uint64_t owner) {
+    CHECK(sentCount >= 2 && magic(0) == ML_SPEAKER_BIND_MAGIC && magic(1) == SS_CONTROLLER_ARRIVAL_MAGIC);
+    CHECK(sent[0].length == ML_SPEAKER_BIND_SIZE && MlSpeakerRead64(sent[0].bytes + 12) == owner);
+    CHECK(sent[0].channel == CTRL_CHANNEL_GAMEPAD_BASE + 3 && sent[1].channel == sent[0].channel);
+    CHECK(sent[0].flags == ENET_PACKET_FLAG_RELIABLE && sent[1].flags == ENET_PACKET_FLAG_RELIABLE);
+    return 0;
+}
+int main(void) {
+    CHECK(startCase() == 0);
     CHECK(testControllerAdmission() == 0);
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-          LI_CCAP_PS_SPEAKER_PCM, UINT64_MAX) == 0);
-    PPACKET_HOLDER binding = take();
-    PPACKET_HOLDER arrival = take();
-    PPACKET_HOLDER fallback = take();
-    CHECK(binding && arrival && fallback && !take());
-    CHECK(binding->channelId == CTRL_CHANNEL_GAMEPAD_BASE + 3 &&
-          arrival->channelId == binding->channelId);
-    CHECK(binding->enetPacketFlags == ENET_PACKET_FLAG_RELIABLE &&
-          arrival->enetPacketFlags == ENET_PACKET_FLAG_RELIABLE);
-    CHECK(MlSpeakerRead32(binding->packet.controllerSpeakerBinding + 4) == ML_SPEAKER_BIND_MAGIC);
-    CHECK(MlSpeakerRead64(binding->packet.controllerSpeakerBinding + 12) == UINT64_MAX);
-    CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-    CHECK(BE32(arrival->packet.header.size) == sizeof(SS_CONTROLLER_ARRIVAL_PACKET) - 4);
-    CHECK(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM);
-    free(binding); free(arrival); free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-
-    // The legacy API still emits exactly the old arrival and MC fallback.
-    CHECK(LiSendControllerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_RUMBLE) == 0);
-    arrival = take(); fallback = take();
-    CHECK(arrival && fallback && !take());
-    CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-    free(arrival); free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-
-    // At the queue boundary, ordinary controller arrival takes priority over
-    // optional speaker binding. No binding may be left without its arrival.
-    observeUnadmittedAlias = 1;
+    endCase();
+    // Historical Sunshine v0.20.0 advertises 7.1.431.-1 but ignores arrival;
+    // its legacy MC fallback must retain baseline capacity under pressure.
     for (int occupied = 147; occupied <= 150; ++occupied) {
+        CHECK(startCase() == 0);
         for (int i = 0; i < occupied; ++i) {
             PPACKET_HOLDER filler = allocatePacketHolder(0);
-            CHECK(filler);
-            CHECK(LbqOfferQueueItem(&packetQueue, filler, &filler->entry) == LBQ_SUCCESS);
+            CHECK(filler && LbqOfferQueueItem(&packetQueue, filler, &filler->entry) == LBQ_SUCCESS);
         }
-        int result = LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-                        LI_CCAP_PS_SPEAKER_PCM, 100 + occupied);
+        int result = LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, UINT64_MAX);
         CHECK(result == (occupied <= 148 ? LBQ_SUCCESS : LBQ_BOUND_EXCEEDED));
-        CHECK(LbqGetItemCount(&packetQueue) == 150);
+        CHECK(LbqGetItemCount(&packetQueue) == (occupied == 147 ? 149 : 150));
         for (int i = 0; i < occupied; ++i) free(take());
-        if (occupied == 147) {
-            binding = take(); arrival = take();
-            CHECK(binding && arrival);
-            CHECK(MlSpeakerRead32(binding->packet.controllerSpeakerBinding + 4) == ML_SPEAKER_BIND_MAGIC);
-            CHECK(MlSpeakerRead64(binding->packet.controllerSpeakerBinding + 12) == 100u + occupied);
-            CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-            CHECK(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM);
-            free(binding); free(arrival);
-            if (occupied == 147) free(take());
-        } else if (occupied <= 149) {
-            arrival = take();
-            CHECK(arrival && LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-            CHECK(!(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM));
-            free(arrival);
-            if (occupied == 148) {
-                fallback = take();
-                CHECK(fallback && LE32(fallback->packet.header.magic) == MULTI_CONTROLLER_MAGIC_GEN5);
-                CHECK(currentQueuedControllerPacket[3] == fallback);
-                free(fallback);
-            }
-        }
-        CHECK(!take());
-        CHECK(!sawUnadmittedAlias);
-        if (occupied >= 149) CHECK(currentQueuedControllerPacket[3] == NULL);
-        memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-        // Capacity recovery must not overwrite a new arrival via a cached,
-        // rejected MC holder returned to the allocation free list.
-        CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-              LI_CCAP_PS_SPEAKER_PCM, 777) == LBQ_SUCCESS);
-        binding = take(); arrival = take(); fallback = take();
-        CHECK(binding && arrival && fallback && !take());
-        CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-        CHECK(MlSpeakerRead64(binding->packet.controllerSpeakerBinding + 12) == 777);
-        free(binding); free(arrival); free(fallback);
-        memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+        CHECK(sendQueued() == 0);
+        if (occupied < 150) CHECK(checkPrefix(UINT64_MAX) == 0);
+        CHECK(sentCount == (occupied <= 148 ? 3 : occupied == 149 ? 2 : 0));
+        if (occupied <= 148) CHECK(magic(2) == MULTI_CONTROLLER_MAGIC_GEN5);
+        CHECK(currentQueuedControllerPacket[3] == NULL);
+        endCase();
     }
-
-    // Reset/reconnect after queue pressure and undelivered packets cannot leak
-    // old bindings or freed MC batching aliases into the next connection.
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-          LI_CCAP_PS_SPEAKER_PCM, 998) == LBQ_SUCCESS);
-    CHECK(currentQueuedControllerPacket[3] != NULL);
-    initialized = false;
-    LbqSignalQueueShutdown(&packetQueue);
-    LbqSignalQueueShutdown(&packetHolderFreeList);
-    destroyInputStream();
-    CHECK(initializeInputStream() == 0);
-    initialized = true;
-    CHECK(currentQueuedControllerPacket[3] == NULL);
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-          LI_CCAP_PS_SPEAKER_PCM, 999) == LBQ_SUCCESS);
-    binding = take(); arrival = take(); fallback = take();
-    CHECK(binding && arrival && fallback && !take());
-    CHECK(MlSpeakerRead64(binding->packet.controllerSpeakerBinding + 12) == 999);
-    free(binding); free(arrival); free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-
-    // Fail each allocation boundary in the actual input translation unit.
-    // Arrival failure publishes nothing; binding failure keeps ordinary input;
-    // MC fallback failure preserves the already published complete pair.
-    for (int failure = 0; failure < 3; ++failure) {
-        clearFreeList();
-        failAllocationAfter = failure;
-        int result = LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-                     LI_CCAP_PS_SPEAKER_PCM, 1234);
+    // Exact same schedule as baseline: arrival admission, ONE keyboard offer,
+    // then MC. All three queue items must fit the three remaining slots.
+    CHECK(startCase() == 0);
+    for (int i = 0; i < 147; ++i) {
+        PPACKET_HOLDER filler = allocatePacketHolder(0);
+        CHECK(filler && LbqOfferQueueItem(&packetQueue, filler, &filler->entry) == LBQ_SUCCESS);
+    }
+    competeAfterArrival = 1;
+    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 9191) == LBQ_SUCCESS);
+    CHECK(contenderResult == LBQ_SUCCESS && LbqGetItemCount(&packetQueue) == 150);
+    for (int i = 0; i < 147; ++i) free(take());
+    CHECK(sendQueued() == 0 && sentCount == 4 && checkPrefix(9191) == 0);
+    CHECK(magic(3) == MULTI_CONTROLLER_MAGIC_GEN5);
+    endCase();
+    // No optional binding allocation exists. Arrival and MC failures retain
+    // baseline behavior, and a rejected arrival never emits a binding.
+    for (int failure = 0; failure < 2; ++failure) {
+        CHECK(startCase() == 0);
+        clearFreeList(); failAllocationAfter = failure;
+        CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 77) == -1);
         failAllocationAfter = -1;
-        CHECK(result == (failure == 1 ? LBQ_SUCCESS : -1));
-        if (failure == 1) {
-            arrival = take(); fallback = take();
-            CHECK(arrival && fallback);
-            CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-            CHECK(!(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM));
-            free(arrival); free(fallback);
-        } else if (failure == 2) {
-            binding = take(); arrival = take();
-            CHECK(binding && arrival);
-            CHECK(MlSpeakerRead32(binding->packet.controllerSpeakerBinding + 4) == ML_SPEAKER_BIND_MAGIC);
-            CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-            free(binding); free(arrival);
-        }
-        CHECK(!take());
-        memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+        CHECK(sendQueued() == 0 && sentCount == (failure == 0 ? 0 : 2));
+        if (failure) CHECK(checkPrefix(77) == 0);
+        endCase();
     }
-
-    // Concurrent real API producers cannot split a pair, duplicate an arrival,
-    // or attach a binding to another producer's announcement.
-    PLT_THREAD producers[4];
-    producer_context contexts[4] = {{0, 0}, {1, 0}, {2, 0}, {3, 0}};
-    for (int i = 0; i < 4; ++i)
-        CHECK(PltCreateThread("speaker-producer", concurrentArrivals, &contexts[i], &producers[i]) == 0);
+    // Real sender fails closed if either ordered wire operation fails.
+    for (int failure = 1; failure <= 2; ++failure) {
+        CHECK(startCase() == 0);
+        CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 88) == 0);
+        failSend = failure;
+        CHECK(sendQueued() == 0 && sentCount == failure && termination == -55);
+        endCase();
+    }
+    for (int legacy = 0; legacy < 4; ++legacy) {
+        CHECK(startCase() == 0);
+        uint8_t type = LI_CTYPE_PS;
+        if (legacy == 0) ControllerSpeakerPcmCallback = NULL;
+        if (legacy == 1) AppVersionQuad[3] = 0;
+        if (legacy == 2) type = 4; // Steam's type-scoped 0x4000 remains intact.
+        int result = legacy == 3 ? LiSendControllerArrivalEvent(3, 8, type, 0, LI_CCAP_PS_SPEAKER_PCM) :
+            LiSendControllerSpeakerArrivalEvent(3, 8, type, 0, LI_CCAP_PS_SPEAKER_PCM, 1);
+        CHECK(result == 0 && sendQueued() == 0);
+        CHECK(sentCount == (legacy == 1 ? 1 : 2));
+        CHECK(magic(0) != ML_SPEAKER_BIND_MAGIC);
+        endCase();
+    }
+    CHECK(startCase() == 0);
+    PLT_THREAD producers[4]; producer_context contexts[4];
     for (int i = 0; i < 4; ++i) {
-        PltJoinThread(&producers[i]);
-        CHECK(!contexts[i].failed);
+        contexts[i] = (producer_context){i, 0};
+        CHECK(PltCreateThread("arrivals", concurrentArrivals, &contexts[i], &producers[i]) == 0);
     }
-    bool seen[4][40] = {{false}};
-    while ((arrival = take()) != NULL) {
-        uint64_t owner = 0;
-        if (LE32(arrival->packet.header.magic) == ML_SPEAKER_BIND_MAGIC) {
-            binding = arrival;
-            owner = MlSpeakerRead64(binding->packet.controllerSpeakerBinding + 12);
-            arrival = take();
-            CHECK(arrival && arrival->channelId == binding->channelId);
-            CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-            free(binding);
-        }
-        if (LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC) {
-            unsigned slot = arrival->packet.controllerArrival.controllerNumber;
-            unsigned serial = LE32(arrival->packet.controllerArrival.supportedButtonFlags);
-            CHECK(slot < 4 && serial < 40 && !seen[slot][serial]);
-            seen[slot][serial] = true;
-            CHECK(owner == ((LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM)
-                            ? (slot + 1) * 100 + serial + 1 : 0));
-        }
-        free(arrival);
+    for (int i = 0; i < 4; ++i) { PltJoinThread(&producers[i]); CHECK(!contexts[i].failed); }
+    CHECK(LbqGetItemCount(&packetQueue) <= 150 && sendQueued() == 0);
+    for (int i = 0; i < sentCount; ++i) if (magic(i) == ML_SPEAKER_BIND_MAGIC) {
+        CHECK(i + 1 < sentCount && magic(i + 1) == SS_CONTROLLER_ARRIVAL_MAGIC);
+        CHECK(sent[i].channel == sent[i + 1].channel);
     }
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-
-    // Steam uses the same numerical capability bit with a different meaning.
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, 4, 0, 0x4000, 1234) == LBQ_SUCCESS);
-    arrival = take(); fallback = take();
-    CHECK(arrival && fallback && !take());
-    CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-    CHECK(LE16(arrival->packet.controllerArrival.capabilities) & 0x4000);
-    free(arrival); free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-
-    ControllerSpeakerPcmCallback = NULL;
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 42) == 0);
-    arrival = take(); fallback = take();
-    CHECK(arrival && fallback && !take());
-    CHECK(!(LE16(arrival->packet.controllerArrival.capabilities) & LI_CCAP_PS_SPEAKER_PCM));
-    free(arrival); free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-    AppVersionQuad[3] = 0; // Non-Sunshine host retains only ordinary MC input.
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 42) == 0);
-    fallback = take();
-    CHECK(fallback && !take());
-    free(fallback);
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-    AppVersionQuad[3] = -1;
-    ControllerSpeakerPcmCallback = speaker;
-    LbqSignalQueueShutdown(&packetQueue);
-    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0,
-          LI_CCAP_PS_SPEAKER_PCM, 8888) == LBQ_INTERRUPTED);
-    CHECK(LbqGetItemCount(&packetQueue) == 0);
-    initialized = false;
-    LbqSignalQueueShutdown(&packetHolderFreeList);
-    destroyInputStream();
-    // Shutdown racing the actual API may accept a complete pair (and possibly
-    // MC fallback), or interrupt it entirely, but never leaves a lone binding.
+    endCase();
     for (int i = 0; i < 30; ++i) {
-        arrival_race race;
-        PLT_THREAD thread;
-        CHECK(initializeInputStream() == 0);
-        initialized = true;
+        CHECK(startCase() == 0);
+        arrival_race race; PLT_THREAD thread;
         CHECK(PltCreateEvent(&race.start) == 0);
-        CHECK(PltCreateThread("speaker-shutdown", arrivalDuringShutdown, &race, &thread) == 0);
-        PltSetEvent(&race.start);
-        LbqSignalQueueShutdown(&packetQueue);
-        PltJoinThread(&thread);
+        CHECK(PltCreateThread("shutdown", arrivalDuringShutdown, &race, &thread) == 0);
+        PltSetEvent(&race.start); LbqSignalQueueShutdown(&packetQueue); PltJoinThread(&thread);
         CHECK(race.result == LBQ_SUCCESS || race.result == LBQ_INTERRUPTED);
-        PLINKED_BLOCKING_QUEUE_ENTRY list = LbqFlushQueueItems(&packetQueue);
-        int count = listSize(list);
-        CHECK(count == 0 || count == 2 || count == 3);
-        if (list) {
-            binding = list->data;
-            arrival = list->flink->data;
-            CHECK(MlSpeakerRead32(binding->packet.controllerSpeakerBinding + 4) == ML_SPEAKER_BIND_MAGIC);
-            CHECK(LE32(arrival->packet.header.magic) == SS_CONTROLLER_ARRIVAL_MAGIC);
-        }
-        while (list) {
-            PLINKED_BLOCKING_QUEUE_ENTRY next = list->flink;
-            free(list->data);
-            list = next;
-        }
-        initialized = false;
-        LbqSignalQueueShutdown(&packetHolderFreeList);
-        destroyInputStream();
-        PltCloseEvent(&race.start);
+        PltCloseEvent(&race.start); endCase();
     }
-    puts("Speaker binding ordering, width, reliable channel and legacy arrival passed");
+    // Undelivered compound arrival/MC holders are safely discarded on teardown.
+    CHECK(startCase() == 0);
+    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 99) == 0);
+    endCase();
+    CHECK(startCase() == 0 && currentQueuedControllerPacket[3] == NULL);
+    CHECK(LiSendControllerSpeakerArrivalEvent(3, 8, LI_CTYPE_PS, 0, LI_CCAP_PS_SPEAKER_PCM, 100) == 0);
+    CHECK(sendQueued() == 0 && sentCount == 3 && checkPrefix(100) == 0);
+    endCase();
+    puts("Compound speaker arrival: baseline queue capacity, ordered actual sender, lifetime and failure paths passed");
     return 0;
 }

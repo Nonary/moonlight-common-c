@@ -130,39 +130,6 @@ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOC
     return LBQ_SUCCESS;
 }
 
-// The queue lock covers both capacity admission and the entire ordered batch.
-// Consumers and other producers can never observe or insert a partial batch.
-int LbqOfferQueueItems(PLINKED_BLOCKING_QUEUE queueHead, void* const* data,
-                      PLINKED_BLOCKING_QUEUE_ENTRY const* entries, int count, int headroom) {
-    bool wasEmpty;
-    PltLockMutex(&queueHead->mutex);
-    if (queueHead->shutdown || queueHead->draining) {
-        PltUnlockMutex(&queueHead->mutex);
-        return LBQ_INTERRUPTED;
-    }
-    // Headroom is checked atomically with admission, but is not reserved.
-    // A later producer may consume it as soon as this mutex is released.
-    if (count <= 0 || headroom < 0 || headroom > queueHead->sizeBound - queueHead->currentSize ||
-        count > queueHead->sizeBound - queueHead->currentSize - headroom) {
-        PltUnlockMutex(&queueHead->mutex);
-        return LBQ_BOUND_EXCEEDED;
-    }
-    wasEmpty = queueHead->head == NULL;
-    for (int i = 0; i < count; ++i) {
-        entries[i]->data = data[i];
-        entries[i]->flink = NULL;
-        entries[i]->blink = queueHead->tail;
-        if (queueHead->tail) queueHead->tail->flink = entries[i];
-        else queueHead->head = entries[i];
-        queueHead->tail = entries[i];
-    }
-    queueHead->currentSize += count;
-    queueHead->lifetimeSize += count;
-    PltUnlockMutex(&queueHead->mutex);
-    if (wasEmpty) PltSignalConditionVariable(&queueHead->cond);
-    return LBQ_SUCCESS;
-}
-
 // This must be synchronized with LbqFlushQueueItems by the caller
 int LbqPeekQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data) {
     PltLockMutex(&queueHead->mutex);

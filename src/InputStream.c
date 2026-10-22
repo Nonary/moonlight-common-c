@@ -52,6 +52,8 @@ typedef struct _PACKET_HOLDER {
     LINKED_BLOCKING_QUEUE_ENTRY entry;
     uint32_t enetPacketFlags;
     uint8_t channelId;
+    // Optional prefix for an arrival, sharing its queue slot and lifetime.
+    uint64_t speakerOwner;
 
     // The union must be the last member since we abuse the NV_UNICODE_PACKET
     // text field to store variable length data which gets split before being
@@ -608,6 +610,23 @@ static void inputSendThreadProc(void* context) {
 
             freePacketHolder(holder);
             continue;
+        }
+
+        // Emit the optional binding immediately before its arrival, on the
+        // same reliable controller channel. A failed prefix terminates sending
+        // just like an ordinary packet failure; never send arrival after it.
+        if (holder->packet.header.magic == LE32(SS_CONTROLLER_ARRIVAL_MAGIC) && holder->speakerOwner) {
+            PACKET_HOLDER binding = {0};
+            binding.channelId = holder->channelId;
+            binding.enetPacketFlags = holder->enetPacketFlags;
+            MlSpeakerPcmBuildBinding(binding.packet.controllerSpeakerBinding,
+                                    ML_SPEAKER_BIND_SIZE,
+                                    holder->packet.controllerArrival.controllerNumber,
+                                    holder->speakerOwner);
+            if (!sendInputPacket(&binding, true)) {
+                freePacketHolder(holder);
+                return;
+            }
         }
 
         // Encrypt and send the input packet
@@ -1455,32 +1474,10 @@ static int sendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeG
         holder->packet.controllerArrival.capabilities = LE16(capabilities);
         holder->packet.controllerArrival.supportedButtonFlags = LE32(supportedButtonFlags);
 
-        err = LBQ_BOUND_EXCEEDED;
-        if (speakerOwner) {
-            // Allocate the essential arrival first. The optional binding must
-            // never crowd out the legacy MC fallback when two slots fit, or
-            // survive a failed arrival. Check one extra slot of headroom in
-            // the same queue lock as pair admission; this is not a reservation.
-            PPACKET_HOLDER binding = allocatePacketHolder(0);
-            if (binding) {
-                binding->channelId = holder->channelId;
-                binding->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
-                MlSpeakerPcmBuildBinding(binding->packet.controllerSpeakerBinding,
-                                        ML_SPEAKER_BIND_SIZE, controllerNumber, speakerOwner);
-                void* packets[] = {binding, holder};
-                PLINKED_BLOCKING_QUEUE_ENTRY entries[] = {&binding->entry, &holder->entry};
-                err = LbqOfferQueueItems(&packetQueue, packets, entries, 2, 1);
-                if (err != LBQ_SUCCESS) freePacketHolder(binding);
-            }
-            if (err == LBQ_BOUND_EXCEEDED) {
-                // No binding was published. Preserve ordinary controller input
-                // when only one/two slots (or one allocation) are available.
-                holder->packet.controllerArrival.capabilities =
-                    LE16(capabilities & ~LI_CCAP_PS_SPEAKER_PCM);
-            }
-        }
-        if (err == LBQ_BOUND_EXCEEDED)
-            err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        // Binding is a prefix of this admitted arrival, not a separate queue
+        // item. Keep exactly the baseline arrival+MC capacity/allocation cost.
+        holder->speakerOwner = speakerOwner;
+        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
         if (err != LBQ_SUCCESS) {
             LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
             Limelog("Input queue reached maximum size limit\n");
