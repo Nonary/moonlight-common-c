@@ -1,5 +1,6 @@
 #include "Limelight-internal.h"
 #include "ControllerHaptics.h"
+#include "ControllerSpeakerPcm.h"
 #include <inttypes.h>
 
 #define MAX_OPTION_NAME_LEN 128
@@ -272,6 +273,8 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         // Send client feature flags to Sunshine hosts
         uint32_t moonlightFeatureFlags = ML_FF_FEC_STATUS | ML_FF_SESSION_ID_V1;
         if (ListenerCallbacks.controllerHaptics) moonlightFeatureFlags |= ML_FF_HAPTICS_PCM;
+        if (ControllerSpeakerPcmCallback)
+            moonlightFeatureFlags |= ML_FF_CONTROLLER_SPEAKER_PCM;
         snprintf(payloadStr, sizeof(payloadStr), "%" PRIu32, moonlightFeatureFlags);
         err |= addAttributeString(&optionHead, "x-ml-general.featureFlags", payloadStr);
 

@@ -21,6 +21,7 @@ extern SOCKADDR_LEN AddrLen;
 extern int AppVersionQuad[4];
 extern STREAM_CONFIGURATION StreamConfig;
 extern CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
+extern ConnListenerControllerSpeakerPcm ControllerSpeakerPcmCallback;
 extern DECODER_RENDERER_CALLBACKS VideoCallbacks;
 extern AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 extern int NegotiatedVideoFormat;

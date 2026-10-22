@@ -14,6 +14,7 @@ SOCKADDR_LEN AddrLen;
 int AppVersionQuad[4];
 STREAM_CONFIGURATION StreamConfig;
 CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
+ConnListenerControllerSpeakerPcm ControllerSpeakerPcmCallback;
 DECODER_RENDERER_CALLBACKS VideoCallbacks;
 AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 int NegotiatedVideoFormat;
@@ -206,10 +207,13 @@ static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* por
 }
 
 // Starts the connection to the streaming machine
-int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
+static int LiStartConnectionInternal(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig,
+    PCONNECTION_LISTENER_CALLBACKS clCallbacks,
     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
-    void* audioContext, int arFlags) {
+    void* audioContext, int arFlags, ConnListenerControllerSpeakerPcm speakerPcmCallback) {
     int err;
+
+    ControllerSpeakerPcmCallback = speakerPcmCallback;
 
     if (drCallbacks != NULL && (drCallbacks->capabilities & CAPABILITY_PULL_RENDERER) && drCallbacks->submitDecodeUnit) {
         Limelog("CAPABILITY_PULL_RENDERER cannot be set with a submitDecodeUnit callback\n");
@@ -545,6 +549,21 @@ Cleanup:
         LiStopConnection();
     }
     return err;
+}
+
+int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig,
+    PCONNECTION_LISTENER_CALLBACKS clCallbacks, PDECODER_RENDERER_CALLBACKS drCallbacks,
+    PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags, void* audioContext, int arFlags) {
+    return LiStartConnectionInternal(serverInfo, streamConfig, clCallbacks, drCallbacks, arCallbacks, renderContext,
+        drFlags, audioContext, arFlags, NULL);
+}
+
+int LiStartConnectionWithSpeakerPcm(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig,
+    PCONNECTION_LISTENER_CALLBACKS clCallbacks, PDECODER_RENDERER_CALLBACKS drCallbacks,
+    PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags, void* audioContext, int arFlags,
+    ConnListenerControllerSpeakerPcm speakerPcmCallback) {
+    return LiStartConnectionInternal(serverInfo, streamConfig, clCallbacks, drCallbacks, arCallbacks, renderContext,
+        drFlags, audioContext, arFlags, speakerPcmCallback);
 }
 
 const char* LiGetLaunchUrlQueryParameters(void) {
