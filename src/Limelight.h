@@ -976,6 +976,10 @@ typedef struct _RTP_VIDEO_STATS {
 
 const RTP_VIDEO_STATS* LiGetRTPVideoStats(void);
 
+// Received video UDP payload bytes, including FEC, RTP headers and encryption.
+// Excludes UDP/IP/link headers. Call only while the video stream is initialized.
+uint64_t LiGetReceivedVideoBytes(void);
+
 // Port index flags for use with LiGetPortFromPortFlagIndex() and LiGetProtocolFromPortFlagIndex()
 #define ML_PORT_INDEX_TCP_47984 0
 #define ML_PORT_INDEX_TCP_47989 1

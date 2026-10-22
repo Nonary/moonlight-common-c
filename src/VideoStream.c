@@ -6,6 +6,8 @@
 #define FIRST_FRAME_PORT 47996
 
 static RTP_VIDEO_QUEUE rtpQueue;
+static PLT_MUTEX receivedBytesMutex;
+static uint64_t receivedVideoBytes;
 
 static SOCKET rtpSocket = INVALID_SOCKET;
 static SOCKET firstFrameSocket = INVALID_SOCKET;
@@ -40,6 +42,8 @@ static bool receivedFullFrame;
 
 // Initialize the video stream
 void initializeVideoStream(void) {
+    PltCreateMutex(&receivedBytesMutex);
+    receivedVideoBytes = 0;
     initializeVideoDepacketizer(StreamConfig.packetSize);
     RtpvInitializeQueue(&rtpQueue);
     decryptionCtx = PltCreateCryptoContext();
@@ -53,6 +57,7 @@ void destroyVideoStream(void) {
     PltDestroyCryptoContext(decryptionCtx);
     destroyVideoDepacketizer();
     RtpvCleanupQueue(&rtpQueue);
+    PltDeleteMutex(&receivedBytesMutex);
 }
 
 // UDP Ping proc
@@ -196,6 +201,11 @@ static void VideoReceiveThreadProc(void* context) {
             // Receive timed out; try again
             continue;
         }
+
+        // Count actual UDP payload before decryption or stale-packet rejection.
+        PltLockMutex(&receivedBytesMutex);
+        receivedVideoBytes += err;
+        PltUnlockMutex(&receivedBytesMutex);
 
         if (!receivedDataFromPeer) {
             receivedDataFromPeer = true;
@@ -475,4 +485,12 @@ int startVideoStream(void* rendererContext, int drFlags) {
 
 const RTP_VIDEO_STATS* LiGetRTPVideoStats(void) {
     return &rtpQueue.stats;
+}
+
+uint64_t LiGetReceivedVideoBytes(void) {
+    uint64_t bytes;
+    PltLockMutex(&receivedBytesMutex);
+    bytes = receivedVideoBytes;
+    PltUnlockMutex(&receivedBytesMutex);
+    return bytes;
 }
