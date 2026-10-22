@@ -542,7 +542,7 @@ typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t
 
 // Bounded controller speaker PCM callback. The callback must copy the borrowed
 // samples before returning and must not block the control receive thread.
-// Only advertise LI_CCAP_CONTROLLER_SPEAKER_PCM for controllers with a working
+// Only advertise LI_CCAP_PS_SPEAKER_PCM for controllers with a working
 // speaker renderer.
 typedef void (*ConnListenerControllerSpeakerPcm)(
     uint16_t controllerNumber, uint32_t generation, uint32_t sequence,

@@ -15,7 +15,9 @@
   (ML_SPEAKER_PCM_HEADER_SIZE +                                                \
    ML_SPEAKER_PCM_MAX_FRAMES * ML_SPEAKER_PCM_FRAME_BYTES)
 #define ML_SPEAKER_PCM_FLAG_DISCONTINUITY 0x0001
-#define LI_CCAP_CONTROLLER_SPEAKER_PCM 0x4000
+// Type-scoped alias: valid only for LI_CTYPE_PS (0x02). Steam controllers
+// use the same bit for attributes; never interpret it without controller type.
+#define LI_CCAP_PS_SPEAKER_PCM 0x4000
 #define ML_FF_CONTROLLER_SPEAKER_PCM 0x08
 
 static inline uint16_t MlSpeakerRead16(const uint8_t *p) {
@@ -58,11 +60,12 @@ static inline int MlSpeakerPcmValidate(const uint8_t *p, size_t size) {
 }
 
 static inline int MlSpeakerPcmCanSend(uint32_t session_flags,
+                                      uint8_t controller_type,
                                       uint16_t controller_capabilities,
                                       int source_available) {
-  return source_available &&
+  return source_available && controller_type == 0x02 &&
          (session_flags & ML_FF_CONTROLLER_SPEAKER_PCM) != 0 &&
-         (controller_capabilities & LI_CCAP_CONTROLLER_SPEAKER_PCM) != 0;
+         (controller_capabilities & LI_CCAP_PS_SPEAKER_PCM) != 0;
 }
 
 // Shared by the Windows endpoint writer and its portable renderer test. The
