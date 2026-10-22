@@ -120,6 +120,9 @@ int initializeInputStream(void) {
     // Start with the virtual mouse centered
     absCurrentPosX = absCurrentPosY = 0.5f;
 
+    // A failed sender may leave queued holders for teardown to free. Their
+    // batching aliases must not survive into the next connection.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
@@ -1150,8 +1153,15 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         // Enqueue the new packet holder
         err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
         if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
+            LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
+            Limelog("Input queue rejected controller packet\n");
+            // A rejected holder is not queued. Remove its batching alias before
+            // recycling it, or a later arrival can reuse this memory and then
+            // be overwritten by the next MC fallback through the stale alias.
+            PltLockMutex(&batchedInputMutex);
+            if (currentQueuedControllerPacket[controllerNumber] == holder)
+                currentQueuedControllerPacket[controllerNumber] = NULL;
+            PltUnlockMutex(&batchedInputMutex);
             freePacketHolder(holder);
         }
     }
@@ -1425,38 +1435,8 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     return err;
 }
 
-int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
-    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
-    PPACKET_HOLDER holder;
-    int err;
-    if (!initialized) return -2;
-    if (controllerNumber >= MAX_GAMEPADS) return -1;
-    if (IS_SUNSHINE() && ControllerSpeakerPcmCallback && speakerOwner &&
-        type == LI_CTYPE_PS && (capabilities & LI_CCAP_PS_SPEAKER_PCM)) {
-        holder = allocatePacketHolder(0);
-        if (!holder) return -1;
-        holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
-        if (!MlSpeakerPcmBuildBinding(holder->packet.controllerSpeakerBinding,
-                                     ML_SPEAKER_BIND_SIZE, controllerNumber, speakerOwner)) {
-            freePacketHolder(holder);
-            return -1;
-        }
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            freePacketHolder(holder);
-            return err;
-        }
-    } else if (type == LI_CTYPE_PS) {
-        // Missing binding must never accidentally advertise speaker output.
-        capabilities &= ~LI_CCAP_PS_SPEAKER_PCM;
-    }
-    return LiSendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
-                                       supportedButtonFlags, capabilities);
-}
-
-int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
-                                 uint32_t supportedButtonFlags, uint16_t capabilities) {
+static int sendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
+                                 uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
     PPACKET_HOLDER holder;
     int err;
 
@@ -1490,9 +1470,32 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
         holder->packet.controllerArrival.capabilities = LE16(capabilities);
         holder->packet.controllerArrival.supportedButtonFlags = LE32(supportedButtonFlags);
 
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        err = LBQ_BOUND_EXCEEDED;
+        if (speakerOwner) {
+            // Allocate the essential arrival first. The optional binding must
+            // never consume the last queue slot or survive a failed arrival.
+            PPACKET_HOLDER binding = allocatePacketHolder(0);
+            if (binding) {
+                binding->channelId = holder->channelId;
+                binding->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+                MlSpeakerPcmBuildBinding(binding->packet.controllerSpeakerBinding,
+                                        ML_SPEAKER_BIND_SIZE, controllerNumber, speakerOwner);
+                void* packets[] = {binding, holder};
+                PLINKED_BLOCKING_QUEUE_ENTRY entries[] = {&binding->entry, &holder->entry};
+                err = LbqOfferQueueItems(&packetQueue, packets, entries, 2);
+                if (err != LBQ_SUCCESS) freePacketHolder(binding);
+            }
+            if (err == LBQ_BOUND_EXCEEDED) {
+                // No binding was published. Preserve ordinary controller input
+                // when only one slot (or one allocation) is available.
+                holder->packet.controllerArrival.capabilities =
+                    LE16(capabilities & ~LI_CCAP_PS_SPEAKER_PCM);
+            }
+        }
+        if (err == LBQ_BOUND_EXCEEDED)
+            err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
         if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+            LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
             Limelog("Input queue reached maximum size limit\n");
             freePacketHolder(holder);
             return err;
@@ -1501,6 +1504,25 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
 
     // Send a MC event just in case the host software doesn't support arrival events.
     return LiSendMultiControllerEvent(controllerNumber, activeGamepadMask, 0, 0, 0, 0, 0, 0, 0);
+}
+
+int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
+    if (!initialized) return -2;
+    if (controllerNumber >= MAX_GAMEPADS) return -1;
+    if (!(IS_SUNSHINE() && ControllerSpeakerPcmCallback && speakerOwner &&
+          type == LI_CTYPE_PS && (capabilities & LI_CCAP_PS_SPEAKER_PCM))) {
+        speakerOwner = 0;
+        if (type == LI_CTYPE_PS) capabilities &= ~LI_CCAP_PS_SPEAKER_PCM;
+    }
+    return sendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
+                                      supportedButtonFlags, capabilities, speakerOwner);
+}
+
+int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities) {
+    return sendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
+                                      supportedButtonFlags, capabilities, 0);
 }
 
 int LiSendControllerTouchEvent2(uint8_t controllerNumber, uint8_t eventType, uint8_t touchpadIndex, uint32_t pointerId, float x, float y, float pressure) {

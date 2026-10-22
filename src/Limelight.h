@@ -864,6 +864,9 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
 // Adds a nonzero client allocation/session incarnation before ordinary arrival.
 // Only the new speaker extension uses this binding; legacy arrival is unchanged.
+// Binding and arrival are queued atomically. If only ordinary arrival fits (or
+// optional binding allocation fails), speaker capability is omitted for this
+// allocation. The return value retains legacy MC-fallback error semantics.
 int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
     uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner);
 

@@ -30,6 +30,9 @@ typedef struct _LINKED_BLOCKING_QUEUE {
 
 int LbqInitializeLinkedBlockingQueue(PLINKED_BLOCKING_QUEUE queueHead, int sizeBound);
 int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry);
+// Append an ordered batch atomically, or leave the queue entirely unchanged.
+int LbqOfferQueueItems(PLINKED_BLOCKING_QUEUE queueHead, void* const* data,
+                      PLINKED_BLOCKING_QUEUE_ENTRY const* entries, int count);
 int LbqWaitForQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 int LbqPeekQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
