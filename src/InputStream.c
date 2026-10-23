@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "ControllerSpeakerPcm.h"
 
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
@@ -51,6 +52,8 @@ typedef struct _PACKET_HOLDER {
     LINKED_BLOCKING_QUEUE_ENTRY entry;
     uint32_t enetPacketFlags;
     uint8_t channelId;
+    // Optional prefix for an arrival, sharing its queue slot and lifetime.
+    uint64_t speakerOwner;
 
     // The union must be the last member since we abuse the NV_UNICODE_PACKET
     // text field to store variable length data which gets split before being
@@ -69,6 +72,7 @@ typedef struct _PACKET_HOLDER {
         SS_TOUCH_PACKET touch;
         SS_PEN_PACKET pen;
         SS_CONTROLLER_ARRIVAL_PACKET controllerArrival;
+        uint8_t controllerSpeakerBinding[ML_SPEAKER_BIND_SIZE];
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
@@ -123,6 +127,9 @@ int initializeInputStream(void) {
     // Start with the virtual mouse centered
     absCurrentPosX = absCurrentPosY = 0.5f;
 
+    // A failed sender may leave queued holders for teardown to free. Their
+    // batching aliases must not survive into the next connection.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
@@ -608,6 +615,23 @@ static void inputSendThreadProc(void* context) {
 
             freePacketHolder(holder);
             continue;
+        }
+
+        // Emit the optional binding immediately before its arrival, on the
+        // same reliable controller channel. A failed prefix terminates sending
+        // just like an ordinary packet failure; never send arrival after it.
+        if (holder->packet.header.magic == LE32(SS_CONTROLLER_ARRIVAL_MAGIC) && holder->speakerOwner) {
+            PACKET_HOLDER binding = {0};
+            binding.channelId = holder->channelId;
+            binding.enetPacketFlags = holder->enetPacketFlags;
+            MlSpeakerPcmBuildBinding(binding.packet.controllerSpeakerBinding,
+                                    ML_SPEAKER_BIND_SIZE,
+                                    holder->packet.controllerArrival.controllerNumber,
+                                    holder->speakerOwner);
+            if (!sendInputPacket(&binding, true)) {
+                freePacketHolder(holder);
+                return;
+            }
         }
 
         // Encrypt and send the input packet
@@ -1143,36 +1167,28 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         holder->packet.multiController.tailA = LE16(MC_TAIL_A);
         holder->packet.multiController.buttonFlags2 = IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0;
         holder->packet.multiController.tailB = LE16(MC_TAIL_B);
+    }
 
-        if (enqueueHolder) {
-            // Make this new packet holder the current enqueued packet
+    if (enqueueHolder) {
+        // Keep the batching mutex through admission. Publishing an alias before
+        // this succeeds lets another sender acknowledge an update to a holder
+        // that can still be rejected by the queue. The queue consumer releases
+        // its queue mutex before acquiring batchedInputMutex.
+        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        if (err == LBQ_SUCCESS && AppVersionQuad[0] != 3) {
             currentQueuedControllerPacket[controllerNumber] = holder;
         }
     }
-
-    // We can unlock the batched input mutex before enqueuing the new holder because
-    // the input thread only cares if currentQueuedControllerPacket is equal to the
-    // holder it's currently processing. Since it cannot be processing the holder
-    // until we enqueue it, there's no risk here of it processing/freeing the
-    // holder when we're still touching it.
-    //
-    // Unlocking early saves a context switch in the common case where the newly
-    // queued packet wakes up the input thread which then immediately blocks on
-    // the batched input mutex until this thread runs again to release it.
+    else {
+        // The packet holder we updated was already admitted.
+        err = 0;
+    }
     PltUnlockMutex(&batchedInputMutex);
 
-    if (enqueueHolder) {
-        // Enqueue the new packet holder
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
-        }
-    }
-    else {
-        // The packet holder we updated was already enqueued
-        err = 0;
+    if (enqueueHolder && err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
+        Limelog("Input queue rejected controller packet\n");
+        freePacketHolder(holder);
     }
 
     return err;
@@ -1440,8 +1456,8 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     return err;
 }
 
-int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
-                                 uint32_t supportedButtonFlags, uint16_t capabilities) {
+static int sendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
+                                 uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
     PPACKET_HOLDER holder;
     int err;
 
@@ -1475,9 +1491,12 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
         holder->packet.controllerArrival.capabilities = LE16(capabilities);
         holder->packet.controllerArrival.supportedButtonFlags = LE32(supportedButtonFlags);
 
+        // Binding is a prefix of this admitted arrival, not a separate queue
+        // item. Keep exactly the baseline arrival+MC capacity/allocation cost.
+        holder->speakerOwner = speakerOwner;
         err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
         if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+            LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
             Limelog("Input queue reached maximum size limit\n");
             freePacketHolder(holder);
             return err;
@@ -1486,6 +1505,25 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
 
     // Send a MC event just in case the host software doesn't support arrival events.
     return LiSendMultiControllerEvent(controllerNumber, activeGamepadMask, 0, 0, 0, 0, 0, 0, 0);
+}
+
+int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner) {
+    if (!initialized) return -2;
+    if (controllerNumber >= MAX_GAMEPADS) return -1;
+    if (!(IS_SUNSHINE() && ControllerSpeakerPcmCallback && speakerOwner &&
+          type == LI_CTYPE_PS && (capabilities & LI_CCAP_PS_SPEAKER_PCM))) {
+        speakerOwner = 0;
+        if (type == LI_CTYPE_PS) capabilities &= ~LI_CCAP_PS_SPEAKER_PCM;
+    }
+    return sendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
+                                      supportedButtonFlags, capabilities, speakerOwner);
+}
+
+int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities) {
+    return sendControllerArrivalEvent(controllerNumber, activeGamepadMask, type,
+                                      supportedButtonFlags, capabilities, 0);
 }
 
 int LiSendControllerTouchEvent2(uint8_t controllerNumber, uint8_t eventType, uint8_t touchpadIndex, uint32_t pointerId, float x, float y, float pressure) {

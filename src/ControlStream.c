@@ -1,5 +1,6 @@
 #include "Limelight-internal.h"
 #include "ControllerHaptics.h"
+#include "ControllerSpeakerPcm.h"
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -1001,17 +1002,21 @@ static void asyncCallbackThreadFunc(void* context) {
         case IDX_STEAM_HAPTIC:
             // Pulses/commands remain events; 0x80 state and explicit stops may be
             // coalesced at insertion, after intervening effects.
-            ListenerCallbacks.steamHaptic(queuedCb->data.steamHaptic.controllerNumber,
-                                          queuedCb->data.steamHaptic.length,
-                                          queuedCb->data.steamHaptic.report);
+            if (SteamHapticCallback) {
+                SteamHapticCallback(queuedCb->data.steamHaptic.controllerNumber,
+                                    queuedCb->data.steamHaptic.length,
+                                    queuedCb->data.steamHaptic.report);
+            }
             break;
         case IDX_STEAM_SETTINGS:
             // Settings writes are events delivered whole and in order: a chunk of a
             // longer write must not replace or outrun its siblings.
-            ListenerCallbacks.steamSettings(queuedCb->data.steamSettings.controllerNumber,
-                                            queuedCb->data.steamSettings.command,
-                                            queuedCb->data.steamSettings.count,
-                                            queuedCb->data.steamSettings.triples);
+            if (SteamSettingsCallback) {
+                SteamSettingsCallback(queuedCb->data.steamSettings.controllerNumber,
+                                      queuedCb->data.steamSettings.command,
+                                      queuedCb->data.steamSettings.count,
+                                      queuedCb->data.steamSettings.triples);
+            }
             break;
         default:
             // Unhandled packet type from queueAsyncCallback()
@@ -1155,7 +1160,10 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
     }
     else if (ctlHdr->type == packetTypes[IDX_STEAM_HAPTIC]) {
-        if (!BbGet16(&bb, &queuedCb->data.steamHaptic.controllerNumber) ||
+        // Registered through LiStartConnectionWithSteamController(); without it the host should
+        // never send these (the client did not advertise the capability), so just drop them.
+        if (SteamHapticCallback == NULL ||
+                !BbGet16(&bb, &queuedCb->data.steamHaptic.controllerNumber) ||
                 !BbGet8(&bb, &queuedCb->data.steamHaptic.length) ||
                 !BbGetBytes(&bb, queuedCb->data.steamHaptic.report, STEAM_HAPTIC_REPORT_MAX) ||
                 queuedCb->data.steamHaptic.length < 2 ||
@@ -1171,7 +1179,8 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         // Fixed-size wire format: controller, command, count, then the full triple
         // array. A short packet, an unknown command, or a count the command or the
         // array cannot carry is dropped rather than applied in part.
-        if (!BbGet16(&bb, &queuedCb->data.steamSettings.controllerNumber) ||
+        if (SteamSettingsCallback == NULL ||
+                !BbGet16(&bb, &queuedCb->data.steamSettings.controllerNumber) ||
                 !BbGet8(&bb, &queuedCb->data.steamSettings.command) ||
                 !BbGet8(&bb, &queuedCb->data.steamSettings.count) ||
                 !BbGetBytes(&bb, queuedCb->data.steamSettings.triples, STEAM_SETTINGS_PAYLOAD_SIZE) ||
@@ -1412,6 +1421,17 @@ static void controlReceiveThreadFunc(void* context) {
                     ListenerCallbacks.controllerHaptics(MlHapticsRead16(payload + 2),
                         MlHapticsRead32(payload + 4), payload + ML_HAPTICS_HEADER_SIZE,
                         MlHapticsRead16(payload + 8));
+                }
+            }
+            else if (ctlHdr->type == ML_SPEAKER_PCM_PACKET_TYPE) {
+                const uint8_t* payload = (const uint8_t*)(ctlHdr + 1);
+                if (packetLength >= (int)sizeof(*ctlHdr) &&
+                    MlSpeakerPcmValidate(payload, packetLength - sizeof(*ctlHdr)) &&
+                    ControllerSpeakerPcmCallback) {
+                    ControllerSpeakerPcmCallback(MlSpeakerRead16(payload + 2), MlSpeakerRead64(payload + 24),
+                        MlSpeakerRead32(payload + 4), MlSpeakerRead32(payload + 8),
+                        MlSpeakerRead64(payload + 12), MlSpeakerRead16(payload + 22),
+                        payload + ML_SPEAKER_PCM_HEADER_SIZE, MlSpeakerRead16(payload + 20));
                 }
             }
             else if (needsAsyncCallback(ctlHdr->type)) {

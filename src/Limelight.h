@@ -540,6 +540,15 @@ typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r
 // Only advertise LI_CCAP_HAPTICS_PCM for controllers with a working renderer.
 typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames);
 
+// Bounded controller speaker PCM callback. The callback must copy the borrowed
+// samples before returning and must not block the control receive thread.
+// Only advertise LI_CCAP_PS_SPEAKER_PCM for controllers with a working
+// speaker renderer.
+typedef void (*ConnListenerControllerSpeakerPcm)(
+    uint16_t controllerNumber, uint64_t speakerOwner, uint32_t generation, uint32_t sequence,
+    uint64_t samplePosition, uint16_t flags, const uint8_t *pcm,
+    uint16_t frames);
+
 // Vibepollo extension: a Steam Controller (2026) haptic output report the host's virtual
 // controller received, for a client that drives the real controller's pads. `report` is the
 // report as the host wrote it, its id first (0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO
@@ -575,8 +584,6 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerControllerHaptics controllerHaptics;
-    ConnListenerSteamHaptic steamHaptic;
-    ConnListenerSteamSettings steamSettings;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -636,6 +643,24 @@ void LiInitializeServerInformation(PSERVER_INFORMATION serverInfo);
 int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
     void* audioContext, int arFlags);
+
+// Like LiStartConnection(), with the controller speaker PCM callback supplied separately.
+// This keeps CONNECTION_LISTENER_CALLBACKS layout compatible with older callers.
+int LiStartConnectionWithSpeakerPcm(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig,
+    PCONNECTION_LISTENER_CALLBACKS clCallbacks, PDECODER_RENDERER_CALLBACKS drCallbacks,
+    PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags, void* audioContext, int arFlags,
+    ConnListenerControllerSpeakerPcm speakerPcmCallback);
+
+// Like LiStartConnectionWithSpeakerPcm(), additionally taking the Steam Controller (2026) callbacks
+// (Vibepollo extension). They are supplied separately for the same reason: CONNECTION_LISTENER_CALLBACKS
+// keeps its V1 layout. Any of the three callbacks may be NULL; a NULL Steam callback drops the
+// corresponding host packets. LiStartConnection() and LiStartConnectionWithSpeakerPcm() clear both
+// Steam callbacks, so a later connection never inherits them.
+int LiStartConnectionWithSteamController(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig,
+    PCONNECTION_LISTENER_CALLBACKS clCallbacks, PDECODER_RENDERER_CALLBACKS drCallbacks,
+    PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags, void* audioContext, int arFlags,
+    ConnListenerControllerSpeakerPcm speakerPcmCallback, ConnListenerSteamHaptic steamHapticCallback,
+    ConnListenerSteamSettings steamSettingsCallback);
 
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
@@ -890,7 +915,19 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 // Grip/stick touch flags are also authoritative from the first state. No packet size change.
 #define LI_CCAP_SC26_BUTTONS   0x1000 // Vibepollo extension; see *_CLICK_FLAG
 #define LI_CCAP_STEAM_SETTINGS 0x2000 // Applies Steam Controller settings writes via ConnListenerSteamSettings() (Vibepollo extension)
+// Shares its bit with LI_CCAP_PS_SPEAKER_PCM (ControllerSpeakerPcm.h). Both are type-scoped: this one is only
+// meaningful on a LI_CTYPE_STEAM arrival, the speaker alias only on LI_CTYPE_PS. Hosts must check the controller
+// type before reading 0x4000. The 16-bit capability field is full after these; a new extension needs another carrier.
 #define LI_CCAP_STEAM_ATTRIBUTES 0x4000 // Sends the real Steam Controller's firmware attributes via LiSendSteamControllerAttributesEvent() (Vibepollo extension)
+
+// Adds a nonzero client allocation/session incarnation before ordinary arrival.
+// Only the new speaker extension uses this binding; legacy arrival is unchanged.
+// Binding and arrival are queued atomically. If only ordinary arrival fits (or
+// optional binding allocation fails), speaker capability is omitted for this
+// allocation. The return value retains legacy MC-fallback error semantics.
+int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask,
+    uint8_t type, uint32_t supportedButtonFlags, uint16_t capabilities, uint64_t speakerOwner);
+
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
