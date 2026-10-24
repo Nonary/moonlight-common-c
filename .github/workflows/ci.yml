@@ -77,3 +77,26 @@ jobs:
           mkdir build_release
           cmake ${{ matrix.cmake_args }} -DCMAKE_BUILD_TYPE=Release -B build_release -S .
           cmake --build build_release --config Release
+
+  # The Steam Controller (2026) protocol tests compile the production sources under test into
+  # their binaries (tests/run-regressions.sh) and were not run by the build matrix above, which
+  # let a fixture that registered no callback stay green while every packet was dropped.
+  steam-regressions:
+    runs-on: ubuntu-latest
+    name: Steam Controller regressions
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Debug with the ABI regression tests
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_ABI_REGRESSION_TESTS=ON -B build_debug -S .
+          cmake --build build_debug --config Debug
+
+      - name: Public ABI regression tests
+        run: ctest --test-dir build_debug --output-on-failure
+
+      - name: Steam Controller protocol regressions
+        run: tests/run-regressions.sh build_debug

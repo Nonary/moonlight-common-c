@@ -76,6 +76,7 @@ typedef struct _PACKET_HOLDER {
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
+        SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET steamControllerAttributes;
         NV_UNICODE_PACKET unicode;
     } packet;
 } PACKET_HOLDER, *PPACKET_HOLDER;
@@ -99,6 +100,10 @@ static struct {
 // Initializes the input stream
 int initializeInputStream(void) {
     memcpy(currentAesIv, StreamConfig.remoteInputAesIv, sizeof(currentAesIv));
+
+    // Teardown frees any holders still queued after a failed/stopped session.
+    // None of those controller batches may survive into this session.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
 
     // Set a high maximum queue size limit to ensure input isn't dropped
     // while the input send thread is blocked for short periods.
@@ -1031,6 +1036,12 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         return -2;
     }
 
+    // A signed remainder can remain negative and index before the batch table.
+    if (controllerNumber < 0) {
+        LC_ASSERT(controllerNumber >= 0);
+        return -3;
+    }
+
     // HACK: We previously used a short for the buttonFlags argument, but we switched to an
     // int to support additional buttons with Sunshine. Unfortunately, some clients still pass
     // a short, which gets sign extended to an int. This causes all the new button flags to be
@@ -1073,10 +1084,16 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         // We do not support batching with the legacy controller packet format
         LC_ASSERT(AppVersionQuad[0] > 3);
 
-        // If this new packet has different button flags, end the batch to ensure the
-        // host receives the exact axis values present at the time of the button press.
+        // Preserve button changes and triggers leaving/returning to rest. Otherwise
+        // a press and release queued before the sender runs collapse into a release.
+        // The virtual Steam Controller also synthesizes a full-pull click at 0xF0.
+        // Preserve that edge too; travel within each range can still be coalesced.
         if (holder->packet.multiController.buttonFlags != LE16((short)buttonFlags) ||
-            holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0)) {
+            holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0) ||
+            (holder->packet.multiController.leftTrigger == 0) != (leftTrigger == 0) ||
+            (holder->packet.multiController.rightTrigger == 0) != (rightTrigger == 0) ||
+            (holder->packet.multiController.leftTrigger >= 0xF0) != (leftTrigger >= 0xF0) ||
+            (holder->packet.multiController.rightTrigger >= 0xF0) != (rightTrigger >= 0xF0)) {
             // Pretend there wasn't a currently queued controller packet
             holder = NULL;
         }
@@ -1571,8 +1588,8 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
     }
 
     // Check for valid motion type values
-    if (motionType - 1 >= MAX_MOTION_EVENTS) {
-        LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+    if (motionType < 1 || motionType > MAX_MOTION_EVENTS) {
+        LC_ASSERT(motionType >= 1 && motionType <= MAX_MOTION_EVENTS);
         return -3;
     }
 
@@ -1668,6 +1685,77 @@ int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState,
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
     if (err != LBQ_SUCCESS) {
         LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}
+
+// Copies at most sizeof(dst) - 1 characters, NUL terminates, and replaces anything outside
+// printable ASCII with '?': the host logs these and hands them to a kernel driver.
+static void copyAttributeString(char* dst, size_t dstSize, const char* src) {
+    size_t i;
+
+    memset(dst, 0, dstSize);
+    if (src == NULL) {
+        return;
+    }
+    for (i = 0; i + 1 < dstSize && src[i] != '\0'; i++) {
+        dst[i] = (src[i] >= 0x20 && src[i] <= 0x7E) ? src[i] : '?';
+    }
+}
+
+int LiSendSteamControllerAttributesEvent(uint8_t controllerNumber, const LI_STEAM_CONTROLLER_ATTRIBUTES* attributes) {
+    PPACKET_HOLDER holder;
+    PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET packet;
+    int err;
+
+    if (!initialized) {
+        return -2;
+    }
+
+    if (attributes == NULL) {
+        return -1;
+    }
+
+    // This is a protocol extension only supported with Sunshine-derived hosts
+    if (!IS_SUNSHINE()) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    // Sunshine supports up to 16 controllers
+    controllerNumber %= MAX_GAMEPADS;
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    // Same channel as the arrival event, reliable: the host sees the arrival first
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+
+    packet = &holder->packet.steamControllerAttributes;
+    packet->header.size = BE32(sizeof(SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET) - sizeof(uint32_t));
+    packet->header.magic = LE32(SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC);
+    packet->controllerNumber = controllerNumber;
+    packet->transport = attributes->transport;
+    packet->validMask = attributes->validMask;
+    packet->reserved = 0;
+    packet->firmwareBuildTime = LE32(attributes->firmwareBuildTime);
+    packet->bootloaderBuildTime = LE32(attributes->bootloaderBuildTime);
+    packet->boardRevision = LE32(attributes->boardRevision);
+    packet->capabilities = LE32(attributes->capabilities);
+    packet->radioFirmwareBuildTime = LE32(attributes->radioFirmwareBuildTime);
+    packet->dongleFirmwareBuildTime = LE32(attributes->dongleFirmwareBuildTime);
+    copyAttributeString(packet->buildId, sizeof(packet->buildId), attributes->buildId);
+    copyAttributeString(packet->unitSerial, sizeof(packet->unitSerial), attributes->unitSerial);
+    copyAttributeString(packet->boardSerial, sizeof(packet->boardSerial), attributes->boardSerial);
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);  // interrupted while stopping
         Limelog("Input queue reached maximum size limit\n");
         freePacketHolder(holder);
     }

@@ -85,6 +85,17 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
             uint8_t left[DS_EFFECT_PAYLOAD_SIZE];
             uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
         } dsAdaptiveTrigger;
+        struct {
+            uint16_t controllerNumber;
+            uint8_t length;
+            uint8_t report[STEAM_HAPTIC_REPORT_MAX];
+        } steamHaptic;
+        struct {
+            uint16_t controllerNumber;
+            uint8_t command;
+            uint8_t count;
+            uint8_t triples[STEAM_SETTINGS_PAYLOAD_SIZE];
+        } steamSettings;
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
 } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
@@ -142,6 +153,11 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_MOTION_EVENT 10
 #define IDX_SET_RGB_LED 11
 #define IDX_DS_ADAPTIVE_TRIGGERS 12
+#define IDX_STEAM_HAPTIC 13
+#define IDX_STEAM_SETTINGS 14
+// Settings chunks queued for the listener at most; a burst of haptic events never evicts one
+// (a 20-triple write arrives as three chunks, and a dropped chunk is a partial write applied).
+#define STEAM_SETTINGS_QUEUE_LIMIT 16
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -160,6 +176,8 @@ static const short packetTypesGen3[] = {
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
+    -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -175,6 +193,8 @@ static const short packetTypesGen4[] = {
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
+    -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -190,6 +210,8 @@ static const short packetTypesGen5[] = {
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
+    -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -205,6 +227,8 @@ static const short packetTypesGen7[] = {
     -1,     // Set motion event (unused)
     -1,     // Set RGB LED (unused)
     -1,     // Adaptive triggers (unused)
+    -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -220,6 +244,8 @@ static const short packetTypesGen7Enc[] = {
     0x5501, // Set motion event (Sunshine protocol extension)
     0x5502, // Set RGB LED (Sunshine protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
+    0x5504, // Steam Controller haptic report (Vibepollo protocol extension)
+    0x5505, // Steam Controller settings write (Vibepollo protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -309,7 +335,11 @@ int initializeControlStream(void) {
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
-    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 30);
+    // Steam haptic reports are queued one per packet (a stop must not be coalesced
+    // away), so a burst of UI clicks needs more headroom than rumble/LED callbacks.
+    // 16 * (7 raw states/stops + 8 conventional states) + HDR = 241 state keys.
+    // Ordinary haptic events have a separate 32-entry limit.
+    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
     PltCreateMutex(&enetMutex);
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -910,76 +940,41 @@ static int ignoreDisconnectIntercept(ENetHost* host, ENetEvent* event) {
     return 0;
 }
 
+static bool canBatchAsyncCallback(void* current, void* next) {
+    PQUEUED_ASYNC_CALLBACK a = current, b = next;
+    if (a->typeIndex != b->typeIndex) return false;
+    switch (a->typeIndex) {
+    case IDX_RUMBLE_DATA: return a->data.rumble.controllerNumber == b->data.rumble.controllerNumber;
+    case IDX_RUMBLE_TRIGGER_DATA: return a->data.rumbleTriggers.controllerNumber == b->data.rumbleTriggers.controllerNumber;
+    case IDX_SET_RGB_LED: return a->data.setControllerLed.controllerNumber == b->data.setControllerLed.controllerNumber;
+    case IDX_HDR_INFO: return true;
+    default: return false;
+    }
+}
+
 static void asyncCallbackThreadFunc(void* context) {
     PQUEUED_ASYNC_CALLBACK queuedCb, nextCb;
 
     while (LbqWaitForQueueElement(&asyncCallbackQueue, (void**)&queuedCb) == LBQ_SUCCESS) {
+        // Priority insertion can replace queued items. Match and take ownership
+        // under one lock instead of dereferencing a borrowed peek after unlocking.
+        while (LbqPollQueueElementMatching(&asyncCallbackQueue, (void**)&nextCb,
+                canBatchAsyncCallback, queuedCb) == LBQ_SUCCESS) {
+            free(queuedCb);
+            queuedCb = nextCb;
+        }
         switch (queuedCb->typeIndex) {
         case IDX_RUMBLE_DATA:
-            // Look for another rumble packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.rumble.controllerNumber != queuedCb->data.rumble.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.rumble(queuedCb->data.rumble.controllerNumber,
                                      queuedCb->data.rumble.lowFreqRumble,
                                      queuedCb->data.rumble.highFreqRumble);
             break;
         case IDX_RUMBLE_TRIGGER_DATA:
-            // Look for another rumble triggers packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.rumbleTriggers.controllerNumber != queuedCb->data.rumbleTriggers.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.rumbleTriggers(queuedCb->data.rumbleTriggers.controllerNumber,
                                              queuedCb->data.rumbleTriggers.leftTriggerMotor,
                                              queuedCb->data.rumbleTriggers.rightTriggerMotor);
             break;
         case IDX_SET_RGB_LED:
-            // Look for another controller LED packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.setControllerLed.controllerNumber != queuedCb->data.setControllerLed.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.setControllerLED(queuedCb->data.setControllerLed.controllerNumber,
                                                queuedCb->data.setControllerLed.r,
                                                queuedCb->data.setControllerLed.g,
@@ -987,18 +982,6 @@ static void asyncCallbackThreadFunc(void* context) {
             break;
         case IDX_HDR_INFO:
             // HDR state is maintained globally, so we just invoke the client callback here.
-            // These events are stateless, so we can consume all of them now.
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS && nextCb->typeIndex == queuedCb->typeIndex) {
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.setHdrMode(hdrEnabled);
             break;
 
@@ -1016,6 +999,25 @@ static void asyncCallbackThreadFunc(void* context) {
                                                   queuedCb->data.dsAdaptiveTrigger.left,
                                                   queuedCb->data.dsAdaptiveTrigger.right);
             break;
+        case IDX_STEAM_HAPTIC:
+            // Pulses/commands remain events; 0x80 state and explicit stops may be
+            // coalesced at insertion, after intervening effects.
+            if (SteamHapticCallback) {
+                SteamHapticCallback(queuedCb->data.steamHaptic.controllerNumber,
+                                    queuedCb->data.steamHaptic.length,
+                                    queuedCb->data.steamHaptic.report);
+            }
+            break;
+        case IDX_STEAM_SETTINGS:
+            // Settings writes are events delivered whole and in order: a chunk of a
+            // longer write must not replace or outrun its siblings.
+            if (SteamSettingsCallback) {
+                SteamSettingsCallback(queuedCb->data.steamSettings.controllerNumber,
+                                      queuedCb->data.steamSettings.command,
+                                      queuedCb->data.steamSettings.count,
+                                      queuedCb->data.steamSettings.triples);
+            }
+            break;
         default:
             // Unhandled packet type from queueAsyncCallback()
             LC_ASSERT(false);
@@ -1032,13 +1034,79 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_SET_MOTION_EVENT] ||
            packetType == packetTypes[IDX_SET_RGB_LED] ||
            packetType == packetTypes[IDX_HDR_INFO] ||
-           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS];
+           packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
+           packetType == packetTypes[IDX_STEAM_HAPTIC] ||
+           packetType == packetTypes[IDX_STEAM_SETTINGS];
+}
+
+// Return a stop key including both report family and actuator mask.
+// Keep families distinct: do not assume their hardware stop effects are interchangeable.
+static unsigned steam_haptic_stop_key(const unsigned char *report, unsigned length) {
+    if (length >= 10 && report[0] == 0x80 &&
+            report[4] == 0 && report[5] == 0 && report[7] == 0 && report[8] == 0) {
+        return (0x80u << 2) | 3;
+    }
+    if (length < 2 || report[1] > 2) return 0;
+    if ((length >= 8 && report[0] == 0x81 &&
+            ((report[2] == 0 && report[3] == 0) || (report[6] == 0 && report[7] == 0))) ||
+            (length >= 4 && report[0] == 0x82 && report[2] == 0)) {
+        return ((unsigned)report[0] << 2) | (report[1] == 2 ? 3 : 1u << report[1]);
+    }
+    return 0;
+}
+
+// A non-zero key names a piece of controller feedback state (only the newest value
+// matters); zero means an event that must be delivered as it arrived.
+static uint32_t asyncCallbackStateKey(void* value) {
+    PQUEUED_ASYNC_CALLBACK cb = value;
+    unsigned controller = 0, subkey = 0;
+    switch (cb->typeIndex) {
+    case IDX_RUMBLE_DATA: controller = cb->data.rumble.controllerNumber; break;
+    case IDX_RUMBLE_TRIGGER_DATA: controller = cb->data.rumbleTriggers.controllerNumber; break;
+    case IDX_SET_RGB_LED: controller = cb->data.setControllerLed.controllerNumber; break;
+    case IDX_SET_MOTION_EVENT:
+        controller = cb->data.setMotionEventState.controllerNumber;
+        subkey = cb->data.setMotionEventState.motionType;
+        if (subkey != 1 && subkey != 2) return 0;
+        break;
+    case IDX_DS_ADAPTIVE_TRIGGERS:
+        controller = cb->data.dsAdaptiveTrigger.controllerNumber;
+        subkey = cb->data.dsAdaptiveTrigger.eventFlags & (DS_EFFECT_LEFT_TRIGGER | DS_EFFECT_RIGHT_TRIGGER);
+        if (subkey == 0) return 0;
+        break;
+    case IDX_STEAM_HAPTIC:
+        controller = cb->data.steamHaptic.controllerNumber;
+        subkey = cb->data.steamHaptic.length >= 10 && cb->data.steamHaptic.report[0] == 0x80 ? (0x80u << 2) | 3 :
+            steam_haptic_stop_key(cb->data.steamHaptic.report, cb->data.steamHaptic.length);
+        if (subkey == 0) return 0;
+        break;
+    case IDX_HDR_INFO: break;
+    case IDX_STEAM_SETTINGS: return 0;  // never coalesced (each chunk carries distinct ids); bounded on its own
+    default: return 0;
+    }
+    if (controller >= 16) return 0;
+    return ((uint32_t)(cb->typeIndex + 1) << 24) | (controller << 16) | subkey;
+}
+
+static bool isCallbackState(void* value) { return asyncCallbackStateKey(value) != 0; }
+// A settings chunk is an event (never coalesced), but one a burst of haptic events must not
+// evict: the controller would apply the write with a chunk missing. It has its own bound.
+static bool isSettingsCallback(void* value) { return ((PQUEUED_ASYNC_CALLBACK)value)->typeIndex == IDX_STEAM_SETTINGS; }
+static bool sameCallbackState(void* a, void* b) {
+    uint32_t key = asyncCallbackStateKey(a);
+    return key != 0 && key == asyncCallbackStateKey(b);
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
     BYTE_BUFFER bb;
     PQUEUED_ASYNC_CALLBACK queuedCb;
+    void* displaced = NULL;
     int err;
+    bool valid = true;
+
+    if (packetLength < (int)sizeof(*ctlHdr)) {
+        return;
+    }
 
     LC_ASSERT(needsAsyncCallback(ctlHdr->type));
 
@@ -1050,33 +1118,32 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
 
     if (ctlHdr->type == packetTypes[IDX_RUMBLE_DATA]) {
-        BbAdvanceBuffer(&bb, 4);
-
-        BbGet16(&bb, &queuedCb->data.rumble.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble);
-        BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble);
+        valid = BbAdvanceBuffer(&bb, 4) &&
+                BbGet16(&bb, &queuedCb->data.rumble.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble) &&
+                BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble);
 
         queuedCb->typeIndex = IDX_RUMBLE_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_RUMBLE_TRIGGER_DATA]) {
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor);
+        valid = BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor) &&
+                BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor);
 
         queuedCb->typeIndex = IDX_RUMBLE_TRIGGER_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_MOTION_EVENT]) {
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz);
-        BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType);
+        valid = BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz) &&
+                BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType);
 
         queuedCb->typeIndex = IDX_SET_MOTION_EVENT;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_RGB_LED]) {
-        BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.r);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.g);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.b);
+        valid = BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.r) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.g) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.b);
 
         queuedCb->typeIndex = IDX_SET_RGB_LED;
     }
@@ -1084,14 +1151,48 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         queuedCb->typeIndex = IDX_HDR_INFO;
     }
     else if (ctlHdr->type == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS]){
-        BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight);
-
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE);
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
+        valid = BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight) &&
+                BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE) &&
+                BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
+    }
+    else if (ctlHdr->type == packetTypes[IDX_STEAM_HAPTIC]) {
+        // Registered through LiStartConnectionWithSteamController(); without it the host should
+        // never send these (the client did not advertise the capability), so just drop them.
+        if (SteamHapticCallback == NULL ||
+                !BbGet16(&bb, &queuedCb->data.steamHaptic.controllerNumber) ||
+                !BbGet8(&bb, &queuedCb->data.steamHaptic.length) ||
+                !BbGetBytes(&bb, queuedCb->data.steamHaptic.report, STEAM_HAPTIC_REPORT_MAX) ||
+                queuedCb->data.steamHaptic.length < 2 ||
+                queuedCb->data.steamHaptic.length > STEAM_HAPTIC_REPORT_MAX) {
+            // The wire always carries the full fixed-size report array. ByteBuffer
+            // zero-fills failed reads, so ignoring their result fabricates a report.
+            free(queuedCb);
+            return;
+        }
+        queuedCb->typeIndex = IDX_STEAM_HAPTIC;
+    }
+    else if (ctlHdr->type == packetTypes[IDX_STEAM_SETTINGS]) {
+        // Fixed-size wire format: controller, command, count, then the full triple
+        // array. A short packet, an unknown command, or a count the command or the
+        // array cannot carry is dropped rather than applied in part.
+        if (SteamSettingsCallback == NULL ||
+                !BbGet16(&bb, &queuedCb->data.steamSettings.controllerNumber) ||
+                !BbGet8(&bb, &queuedCb->data.steamSettings.command) ||
+                !BbGet8(&bb, &queuedCb->data.steamSettings.count) ||
+                !BbGetBytes(&bb, queuedCb->data.steamSettings.triples, STEAM_SETTINGS_PAYLOAD_SIZE) ||
+                queuedCb->data.steamSettings.count > STEAM_SETTINGS_TRIPLES_MAX ||
+                (queuedCb->data.steamSettings.command == STEAM_SETTINGS_SET_VALUES
+                    ? queuedCb->data.steamSettings.count == 0
+                    : queuedCb->data.steamSettings.command != STEAM_SETTINGS_LOAD_DEFAULTS ||
+                      queuedCb->data.steamSettings.count != 0)) {
+            free(queuedCb);
+            return;
+        }
+        queuedCb->typeIndex = IDX_STEAM_SETTINGS;
     }
     else {
         // Unhandled packet type from needsAsyncCallback()
@@ -1100,7 +1201,20 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         return;
     }
 
-    err = LbqOfferQueueItem(&asyncCallbackQueue, queuedCb, &queuedCb->entry);
+    if (!valid) {
+        // Failed ByteBuffer reads fabricate zero-valued fields. A partial state
+        // must not invoke a callback or displace a complete pending update.
+        free(queuedCb);
+        return;
+    }
+
+    // State (the newest rumble/LED/trigger value, a Steam haptic stop) replaces its queued
+    // predecessor in place; ordinary events keep their arrival order and are bounded to 32;
+    // Steam settings chunks are reserved events with their own bound that a haptic burst
+    // cannot evict.
+    err = LbqOfferQueueItemClassed(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
+        sameCallbackState, isCallbackState, 32, isSettingsCallback, STEAM_SETTINGS_QUEUE_LIMIT, &displaced);
+    free(displaced);
     if (err != LBQ_SUCCESS) {
         Limelog("Failed to queue async callback: %d\n", err);
         free(queuedCb);

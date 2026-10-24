@@ -138,6 +138,11 @@ if (BUILD_ABI_REGRESSION_TESTS)
   target_link_libraries(test_legacy_start_abi PRIVATE moonlight-common-c)
   add_test(NAME legacy_start_abi COMMAND test_legacy_start_abi)
 
+  add_executable(test_steam_controller_start_abi tests/test_steam_controller_start_abi.c)
+  target_include_directories(test_steam_controller_start_abi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(test_steam_controller_start_abi PRIVATE moonlight-common-c)
+  add_test(NAME steam_controller_start_abi COMMAND test_steam_controller_start_abi)
+
   add_executable(test_connection_listener_callbacks_v1_layout tests/test_connection_listener_callbacks_v1_layout.c)
   target_include_directories(test_connection_listener_callbacks_v1_layout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   add_test(NAME connection_listener_callbacks_v1_layout COMMAND test_connection_listener_callbacks_v1_layout)
