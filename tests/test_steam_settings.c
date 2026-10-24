@@ -19,6 +19,16 @@ static void send_settings(unsigned controller, unsigned command, unsigned count,
     queueAsyncCallback(hdr, sizeof(bytes));
 }
 
+// The fixture's registered sinks. queueAsyncCallback() drops a Steam packet while no client
+// callback is registered (the client did not advertise the capability), so a fixture that leaves
+// them NULL exercises nothing but that drop.
+static void haptic_sink(uint16_t controllerNumber, uint8_t length, const uint8_t* report) {
+    (void)controllerNumber; (void)length; (void)report;
+}
+static void settings_sink(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t* triples) {
+    (void)controllerNumber; (void)command; (void)count; (void)triples;
+}
+
 int main(void) {
     union {
         NVCTL_ENET_PACKET_HEADER_V1 header;
@@ -31,6 +41,22 @@ int main(void) {
     packet.bytes[2] = 7;
     int failures = 0;
     if (LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256) != 0) return 2;
+
+    // Without a registered callback every packet is dropped, well-formed or not: the client did
+    // not advertise LI_CCAP_STEAM_SETTINGS, so the host should never have sent it.
+    {
+        void* value = NULL;
+        packet.bytes[4] = STEAM_SETTINGS_SET_VALUES;
+        packet.bytes[5] = 1;
+        SteamSettingsCallback = NULL;
+        queueAsyncCallback(&packet.header, sizeof(packet.bytes));
+        bool dropped = LbqPollQueueElement(&asyncCallbackQueue, &value) != LBQ_SUCCESS;
+        printf("%s a well-formed settings packet is dropped while no callback is registered\n", dropped ? "PASS" : "FAIL");
+        failures += !dropped;
+        free(value);
+    }
+    SteamSettingsCallback = settings_sink;
+    SteamHapticCallback = haptic_sink;  // the flood and burst cases below queue haptic packets too
 
     // Every command byte, every count, every length: only a full-size packet carrying 0x87
     // with 1..9 triples or 0x8E with none is admitted, and what arrives is what was sent.

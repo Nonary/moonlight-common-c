@@ -10,6 +10,16 @@ static void send_haptic(unsigned controller, unsigned type, unsigned side, bool 
     queueAsyncCallback(hdr, sizeof(bytes));
 }
 
+// The fixture's registered sinks. queueAsyncCallback() drops a Steam packet while no client
+// callback is registered (the client did not advertise the capability), so a fixture that leaves
+// them NULL exercises nothing but that drop.
+static void haptic_sink(uint16_t controllerNumber, uint8_t length, const uint8_t* report) {
+    (void)controllerNumber; (void)length; (void)report;
+}
+static void settings_sink(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t* triples) {
+    (void)controllerNumber; (void)command; (void)count; (void)triples;
+}
+
 static void consume_test_callbacks(void* context) {
     unsigned* consumed = context;
     PQUEUED_ASYNC_CALLBACK current, next;
@@ -36,6 +46,22 @@ int main(void) {
     packet.bytes[5] = 0x81;
     int failures = 0;
     if (LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256) != 0) return 2;
+
+    // Without a registered callback every packet is dropped, well-formed or not: the client did
+    // not advertise LI_CCAP_STEAM_HAPTIC, so the host should never have sent it.
+    {
+        void* value = NULL;
+        packet.bytes[4] = 8;
+        SteamHapticCallback = NULL;
+        queueAsyncCallback(&packet.header, sizeof(packet.bytes));
+        bool dropped = LbqPollQueueElement(&asyncCallbackQueue, &value) != LBQ_SUCCESS;
+        printf("%s a well-formed haptic packet is dropped while no callback is registered\n", dropped ? "PASS" : "FAIL");
+        failures += !dropped;
+        free(value);
+    }
+    SteamHapticCallback = haptic_sink;
+    SteamSettingsCallback = settings_sink;
+
     for (int declared = 0; declared <= 255; ++declared) {
         packet.bytes[4] = (unsigned char)declared;
         for (int length = sizeof(packet.header); length <= sizeof(packet.bytes); ++length) {
