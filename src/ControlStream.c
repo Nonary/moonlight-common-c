@@ -1,6 +1,7 @@
 #include "Limelight-internal.h"
 #include "ControllerHaptics.h"
 #include "ControllerSpeakerPcm.h"
+#include "HostCursor.h"
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -134,6 +135,11 @@ static PLT_EVENT idrFrameRequiredEvent;
 
 static PPLT_CRYPTO_CONTEXT encryptionCtx;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
+
+static ConnListenerHostCursorState hostCursorStateCallback;
+static ConnListenerHostCursorShape hostCursorShapeCallback;
+static ML_HOST_CURSOR_ASSEMBLY hostCursorAssembly;
+static bool hostCursorMalformedLogged;
 
 #define CONN_IMMEDIATE_POOR_LOSS_RATE 30
 #define CONN_CONSECUTIVE_POOR_LOSS_RATE 15
@@ -330,8 +336,15 @@ static bool supportsIdrFrameRequest;
 #define PERIODIC_PING_INTERVAL_MS 100
 
 // Initializes the control stream
+void LiSetHostCursorCallbacks(ConnListenerHostCursorState stateCallback, ConnListenerHostCursorShape shapeCallback) {
+    hostCursorStateCallback = stateCallback;
+    hostCursorShapeCallback = shapeCallback;
+}
+
 int initializeControlStream(void) {
     stopping = false;
+    MlHostCursorResetAssembly(&hostCursorAssembly);
+    hostCursorMalformedLogged = false;
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -415,6 +428,7 @@ void destroyControlStream(void) {
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue));
+    MlHostCursorResetAssembly(&hostCursorAssembly);
 
     PltDeleteMutex(&enetMutex);
 }
@@ -1221,6 +1235,40 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     }
 }
 
+// Host cursor messages are validated and delivered on this thread, like haptics PCM.
+// They are only interpreted from a host that advertised the extension.
+static void handleHostCursorPacket(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
+    const uint8_t* payload = (const uint8_t*)(ctlHdr + 1);
+    size_t size;
+    bool valid = true;
+
+    if (packetLength < (int)sizeof(*ctlHdr) || !(SunshineFeatureFlags & LI_FF_HOST_CURSOR)) {
+        return;
+    }
+    size = (size_t)packetLength - sizeof(*ctlHdr);
+
+    if (ctlHdr->type == ML_HOST_CURSOR_STATE_TYPE) {
+        LI_HOST_CURSOR_STATE state;
+        valid = MlHostCursorParseState(payload, size, &state);
+        if (valid && hostCursorStateCallback) {
+            hostCursorStateCallback(&state);
+        }
+    }
+    else if (hostCursorShapeCallback) {
+        LI_HOST_CURSOR_SHAPE shape;
+        int ret = MlHostCursorFeedShape(&hostCursorAssembly, payload, size, &shape);
+        valid = ret >= 0;
+        if (ret > 0) {
+            hostCursorShapeCallback(&shape);
+        }
+    }
+
+    if (!valid && !hostCursorMalformedLogged) {
+        Limelog("Dropping malformed host cursor message (type %04x, %d bytes)\n", ctlHdr->type, packetLength);
+        hostCursorMalformedLogged = true;
+    }
+}
+
 static void controlReceiveThreadFunc(void* context) {
     int err;
 
@@ -1413,7 +1461,10 @@ static void controlReceiveThreadFunc(void* context) {
             }
 
             // Process client callbacks in a separate thread
-            if (ctlHdr->type == ML_HAPTICS_PACKET_TYPE) {
+            if (ctlHdr->type == ML_HOST_CURSOR_STATE_TYPE || ctlHdr->type == ML_HOST_CURSOR_SHAPE_TYPE) {
+                handleHostCursorPacket(ctlHdr, packetLength);
+            }
+            else if (ctlHdr->type == ML_HAPTICS_PACKET_TYPE) {
                 const uint8_t* payload = (const uint8_t*)(ctlHdr + 1);
                 if (packetLength >= (int)sizeof(*ctlHdr) &&
                     MlHapticsValidate(payload, packetLength - sizeof(*ctlHdr)) &&
@@ -1698,6 +1749,28 @@ static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFr
     }
 
     Limelog("Invalidate reference frame request sent (%d to %d)\n", startFrame, endFrame);
+}
+
+int LiSendHostCursorControl(uint8_t flags, uint32_t resendShapeId) {
+    uint8_t payload[ML_HOST_CURSOR_CONTROL_SIZE];
+
+    if (!(SunshineFeatureFlags & LI_FF_HOST_CURSOR) || (flags & ~ML_HOST_CURSOR_CONTROL_FLAGS_ALL) ||
+            AppVersionQuad[0] < 5 || peer == NULL || stopping) {
+        return -1;
+    }
+
+    MlHostCursorEncodeControl(payload, flags, resendShapeId);
+    if (!sendMessageAndForget(ML_HOST_CURSOR_CONTROL_TYPE,
+                              sizeof(payload),
+                              payload,
+                              ML_HOST_CURSOR_CHANNEL,
+                              ENET_PACKET_FLAG_RELIABLE,
+                              false)) {
+        Limelog("Host cursor control: Transaction failed: %d\n", (int)LastSocketError());
+        return LastSocketFail();
+    }
+
+    return 0;
 }
 
 static void confirmLongtermReferenceFrame(uint32_t frameIndex) {

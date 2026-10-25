@@ -1217,7 +1217,62 @@ void LiRequestIdrFrame(void);
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
+#define LI_FF_HOST_CURSOR             0x00010000 // Vibeshine extension: LiSetHostCursorCallbacks()/LiSendHostCursorControl()
 uint32_t LiGetHostFeatureFlags(void);
+
+// Vibeshine extension: client-side cursor. A host that sets LI_FF_HOST_CURSOR reports
+// its cursor's visibility, clip, position and shape so the client can draw it as a
+// local cursor and pick between absolute and relative mouse input. Nothing is sent
+// until the client subscribes with LiSendHostCursorControl().
+//
+// Coordinates are in the stream's coordinate space: (0, 0) to (referenceWidth,
+// referenceHeight) is the whole video frame, the same space as LiSendMousePositionEvent().
+#define LI_HOST_CURSOR_VISIBLE      0x01 // The host cursor is shown
+#define LI_HOST_CURSOR_FALLBACK     0x02 // Cursor information is unavailable; use the regular mouse mode
+#define LI_HOST_CURSOR_HAS_POSITION 0x04 // x/y are valid (the host moved the cursor, or a transition)
+#define LI_HOST_CURSOR_HAS_CLIP     0x08 // The cursor is confined to clipLeft..clipRight/clipTop..clipBottom (exclusive)
+#define LI_HOST_CURSOR_COMPOSITED   0x10 // The host currently draws the cursor into the video
+#define LI_HOST_CURSOR_RESYNC       0x20 // Full state after (re)subscribing
+typedef struct _LI_HOST_CURSOR_STATE {
+    uint8_t flags;
+    uint32_t sequence;
+    uint32_t shapeId;           // 0 when there is no shape
+    uint16_t referenceWidth;
+    uint16_t referenceHeight;
+    uint32_t scaleQ16;          // Stream pixels per shape pixel, 16.16 fixed point
+    int32_t x;
+    int32_t y;
+    int32_t clipLeft;
+    int32_t clipTop;
+    int32_t clipRight;
+    int32_t clipBottom;
+} LI_HOST_CURSOR_STATE;
+
+#define LI_HOST_CURSOR_MAX_DIMENSION 256
+typedef struct _LI_HOST_CURSOR_SHAPE {
+    uint32_t shapeId;
+    uint16_t width;
+    uint16_t height;
+    uint16_t hotspotX;
+    uint16_t hotspotY;
+    const uint8_t* pixels;      // width * height * 4 bytes: B, G, R, A (straight alpha), top-down
+} LI_HOST_CURSOR_SHAPE;
+
+// Both callbacks run on the control receive thread, after validation. They must not
+// block; the arguments are borrowed for the duration of the call. Each shape arrives
+// once per subscription; a state may name a shape the client should already have.
+typedef void(*ConnListenerHostCursorState)(const LI_HOST_CURSOR_STATE* state);
+typedef void(*ConnListenerHostCursorShape)(const LI_HOST_CURSOR_SHAPE* shape);
+
+// Set before LiStartConnection(); NULL drops the corresponding host messages.
+void LiSetHostCursorCallbacks(ConnListenerHostCursorState stateCallback, ConnListenerHostCursorShape shapeCallback);
+
+// Subscribes to (or unsubscribes from) the host cursor, and tells the host whether the
+// client draws the cursor itself, so the host can leave it out of the video. A non-zero
+// resendShapeId asks for that shape again. Fails unless the host set LI_FF_HOST_CURSOR.
+#define LI_HOST_CURSOR_CONTROL_SUBSCRIBE    0x01
+#define LI_HOST_CURSOR_CONTROL_CLIENT_DRAWS 0x02
+int LiSendHostCursorControl(uint8_t flags, uint32_t resendShapeId);
 
 #ifdef __cplusplus
 }
