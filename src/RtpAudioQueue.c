@@ -257,6 +257,11 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         fecBlockBaseTs = BE32(fecHeader->baseTimestamp);
         fecBlockSsrc = BE32(fecHeader->ssrc);
 
+        if (fecBlockPayloadType != RTP_PAYLOAD_TYPE_AUDIO) {
+            queue->stats.packetCountFecInvalid++;
+            return NULL;
+        }
+
         // Ensure the FEC shard index is valid to prevent OOB access
         // later during recovery.
         if (fecHeader->fecShardIndex >= RTPA_FEC_SHARDS) {
@@ -291,9 +296,16 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     // when the connection begins. Start on the next FEC block boundary, so we can
     // be sure we aren't starting in the middle (which will lead to a spurious audio
     // data block recovery warning on connection start if we miss more than 2 packets).
-    if (queue->synchronizing && queue->oldestRtpBaseSequenceNumber == 0) {
-        queue->nextRtpSequenceNumber = queue->oldestRtpBaseSequenceNumber = fecBlockBaseSeqNum + RTPA_DATA_SHARDS;
-        return NULL;
+    if (!queue->initialSequenceKnown) {
+        // Zero is the valid next block after 65532..65535.
+        queue->initialSequenceKnown = true;
+        if (FreshAudioAfterPing && fecBlockBaseSeqNum == 0) {
+            queue->nextRtpSequenceNumber = queue->oldestRtpBaseSequenceNumber = 0;
+        }
+        else {
+            queue->nextRtpSequenceNumber = queue->oldestRtpBaseSequenceNumber = fecBlockBaseSeqNum + RTPA_DATA_SHARDS;
+            return NULL;
+        }
     }
 
     // Drop packets from FEC blocks that have already been completed
@@ -306,6 +318,12 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     while (existingBlock != NULL) {
         if (existingBlock->fecHeader.baseSequenceNumber == fecBlockBaseSeqNum) {
             // The FEC header data should match for all packets
+            if (existingBlock->fecHeader.payloadType != fecBlockPayloadType ||
+                    existingBlock->fecHeader.baseTimestamp != fecBlockBaseTs ||
+                    existingBlock->fecHeader.ssrc != fecBlockSsrc) {
+                queue->stats.packetCountFecInvalid++;
+                return NULL;
+            }
             LC_ASSERT_VT(existingBlock->fecHeader.payloadType == fecBlockPayloadType);
             LC_ASSERT_VT(existingBlock->fecHeader.baseTimestamp == fecBlockBaseTs);
             LC_ASSERT_VT(existingBlock->fecHeader.ssrc == fecBlockSsrc);
@@ -544,7 +562,7 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // At this point, we know we've got a second FEC block queued up waiting on the first one to complete.
     // If we've never seen OOS data from this host, we'll assume the first one is lost and skip forward.
     // If we have seen OOS data, we'll wait for a little while longer to see if OOS packets arrive before giving up.
-    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > (uint64_t)(AudioPacketDuration * RTPA_DATA_SHARDS) + (RTPQ_OOS_WAIT_TIME_MS * 1000)) {
+    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > (uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS * 1000 + (RTPQ_OOS_WAIT_TIME_MS * 1000)) {
         LC_ASSERT(!isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber));
 
         atomic_fetch_add_explicit(&queue->stats.packetCountFecFailed, 1, memory_order_relaxed);
@@ -564,6 +582,23 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
 }
 
 int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
+    // Validate before reading any RTP fields, including on the legacy bypass.
+    // This receiver supports the fixed 12-byte audio RTP header, no CSRCs,
+    // extensions or RTP padding. AES-CBC padding belongs to the payload.
+    if (length <= sizeof(RTP_PACKET) || length > RTPA_MAX_PACKET_SIZE || packet->header != 0x80 ||
+            (packet->packetType != RTP_PAYLOAD_TYPE_AUDIO && packet->packetType != RTP_PAYLOAD_TYPE_FEC) ||
+            (packet->packetType == RTP_PAYLOAD_TYPE_FEC && length <= sizeof(RTP_PACKET) + sizeof(AUDIO_FEC_HEADER))) {
+        queue->stats.packetCountInvalid++;
+        return 0;
+    }
+    if (AudioEncryptionEnabled) {
+        unsigned payloadLength = length - sizeof(RTP_PACKET) -
+            (packet->packetType == RTP_PAYLOAD_TYPE_FEC ? sizeof(AUDIO_FEC_HEADER) : 0);
+        if (payloadLength % 16 != 0) {
+            queue->stats.packetCountInvalid++;
+            return 0;
+        }
+    }
     if (queue->incompatibleServer) {
         // Just feed audio data straight through to the decoder. We lose handling of out-of-order
         // and duplicated packets in this mode, but it shouldn't be a problem for the very small
@@ -615,6 +650,11 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
                 freeFecBlockHead(queue);
             }
             else {
+                // This in-order shard may make earlier parity sufficient to
+                // recover successors. The caller drains them after direct submit.
+                if (fecBlock->fecShardsReceived != 0 && completeFecBlock(queue, fecBlock)) {
+                    fecBlock->fullyReassembled = true;
+                }
                 validateFecBlockState(queue);
             }
 

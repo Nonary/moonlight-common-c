@@ -297,7 +297,10 @@ static int LiStartConnectionInternal(PSERVER_INFORMATION serverInfo, PSTREAM_CON
     
     // Validate the audio configuration
     if (MAGIC_BYTE_FROM_AUDIO_CONFIG(StreamConfig.audioConfiguration) != 0xCA ||
-            CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT) {
+            CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) == 0 ||
+            CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT ||
+            (CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) == 12 &&
+             (uint32_t)StreamConfig.audioConfiguration != AUDIO_CONFIGURATION_714_SURROUND)) {
         Limelog("Invalid audio configuration specified\n");
         err = -1;
         goto Cleanup;

@@ -8,6 +8,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 option(USE_MBEDTLS "Use MbedTLS instead of OpenSSL" OFF)
 option(CODE_ANALYSIS "Run code analysis during compilation" OFF)
 option(BUILD_ABI_REGRESSION_TESTS "Build public callback ABI regression tests" OFF)
+option(BUILD_AUDIO_REGRESSION_TESTS "Build production audio SDP and local receiver replay regression tests" OFF)
 
 SET(CMAKE_C_STANDARD 11)
 
@@ -122,4 +123,16 @@ if (BUILD_ABI_REGRESSION_TESTS)
   add_executable(test_connection_listener_callbacks_v1_layout tests/test_connection_listener_callbacks_v1_layout.c)
   target_include_directories(test_connection_listener_callbacks_v1_layout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   add_test(NAME connection_listener_callbacks_v1_layout COMMAND test_connection_listener_callbacks_v1_layout)
+endif()
+
+if (BUILD_AUDIO_REGRESSION_TESTS)
+  enable_testing()
+  target_compile_definitions(moonlight-common-c PRIVATE LI_AUDIO_TESTING)
+  add_executable(test_audio_protocol tests/test_audio_protocol.c tests/test_audio_receive.c)
+  target_compile_definitions(test_audio_protocol PRIVATE LI_AUDIO_PROTOCOL_TEST_MAIN
+    $<TARGET_PROPERTY:moonlight-common-c,COMPILE_DEFINITIONS>)
+  target_include_directories(test_audio_protocol PRIVATE
+    $<TARGET_PROPERTY:moonlight-common-c,INCLUDE_DIRECTORIES>)
+  target_link_libraries(test_audio_protocol PRIVATE moonlight-common-c enet)
+  add_test(NAME audio_protocol_and_receive COMMAND test_audio_protocol)
 endif()
