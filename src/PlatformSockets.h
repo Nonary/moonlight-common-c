@@ -128,7 +128,8 @@ int sendMtuSafe(SOCKET s, char* buffer, int size);
 SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int socketQosType);
 int enableNoDelay(SOCKET s);
 int setSocketNonBlocking(SOCKET s, bool enabled);
-int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect);
+int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect,
+                  struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen);
 // Requires a nonblocking socket. Read queued data before waiting; zero means
 // the socket stayed empty through the requested wait, not a zero-byte packet.
 int recvUdpSocketWithTimeout(SOCKET s, char* buffer, int size, int timeoutMs);

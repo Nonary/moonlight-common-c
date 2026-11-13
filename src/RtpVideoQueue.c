@@ -242,7 +242,7 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
         // receiving OOS data, which is unlikely because we've not seen any recently from this host.
         // PyroWave frames are delivered with holes (see completeBlockWithLostPackets()), so an
         // unrecoverable block is not a lost frame there.
-        if (!queue->reportedLostFrame && !queue->receivedOosData &&
+        if (isReferenceFrameInvalidationEnabled() && !queue->reportedLostFrame && !queue->receivedOosData &&
                 !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) {
             // NB: We use totalPackets - neededPackets instead of just bufferParityPackets here because we require
             // one extra parity shard for recovery if we're in FEC validation mode.
@@ -812,7 +812,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     }
 
 #ifndef LC_FUZZING
-    if (isBefore16(nvPacket->frameIndex, queue->currentFrameNumber)) {
+    if (isBefore32(nvPacket->frameIndex, queue->currentFrameNumber)) {
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }
@@ -875,11 +875,13 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                     // Notify the host of the loss of this frame
                     if (!queue->reportedLostFrame) {
                         notifyFrameLost(queue->currentFrameNumber, false);
-                        queue->reportedLostFrame = true;
                     }
 
+                    // NB: We reset reportedLostFrame here because we don't want to suppress
+                    // the reporting of the _next_ frame if it's lost.
                     queue->currentFrameNumber++;
                     queue->multiFecCurrentBlockNumber = 0;
+                    queue->reportedLostFrame = false;
                     return RTPF_RET_REJECTED;
                 }
             }
@@ -910,13 +912,16 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 
             // Notify the host of the loss of this frame
             if (!queue->reportedLostFrame) {
-                notifyFrameLost(queue->currentFrameNumber, false);
-                queue->reportedLostFrame = true;
+                notifyFrameLost(nvPacket->frameIndex, false);
             }
 
             // We dropped a block of this frame, so we must skip to the next one.
+            //
+            // NB: We reset reportedLostFrame here because we don't want to suppress
+            // the reporting of the _next_ frame if it's lost.
             queue->currentFrameNumber = nvPacket->frameIndex + 1;
             queue->multiFecCurrentBlockNumber = 0;
+            queue->reportedLostFrame = false;
             return RTPF_RET_REJECTED;
         }
 
@@ -967,8 +972,8 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->multiFecCurrentBlockNumber = fecCurrentBlockNumber;
         queue->multiFecLastBlockNumber = (nvPacket->multiFecBlocks >> 6) & 0x3;
 
-        queue->stats.packetCountVideo += queue->bufferDataPackets;
-        queue->stats.packetCountFec += queue->bufferParityPackets;
+        atomic_fetch_add_explicit(&queue->stats.packetCountVideo, queue->bufferDataPackets, memory_order_relaxed);
+        atomic_fetch_add_explicit(&queue->stats.packetCountFec, queue->bufferParityPackets, memory_order_relaxed);
     }
 
     // Reject packets above our FEC queue valid sequence number range
@@ -1094,5 +1099,19 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 
         return RTPF_RET_QUEUED;
     }
+}
+
+void RtpvGetStats(PRTP_VIDEO_QUEUE queue, PRTP_VIDEO_STATS stats) {
+    if (stats == NULL) {
+        return;
+    }
+
+    stats->packetCountVideo = atomic_load_explicit(&queue->stats.packetCountVideo, memory_order_relaxed);
+    stats->packetCountFec = atomic_load_explicit(&queue->stats.packetCountFec, memory_order_relaxed);
+    stats->packetCountFecRecovered = atomic_load_explicit(&queue->stats.packetCountFecRecovered, memory_order_relaxed);
+    stats->packetCountFecFailed = atomic_load_explicit(&queue->stats.packetCountFecFailed, memory_order_relaxed);
+    stats->packetCountOOS = atomic_load_explicit(&queue->stats.packetCountOOS, memory_order_relaxed);
+    stats->packetCountInvalid = atomic_load_explicit(&queue->stats.packetCountInvalid, memory_order_relaxed);
+    stats->packetCountFecInvalid = atomic_load_explicit(&queue->stats.packetCountFecInvalid, memory_order_relaxed);
 }
 

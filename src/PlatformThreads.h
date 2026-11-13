@@ -3,6 +3,8 @@
 #include "Limelight.h"
 #include "Platform.h"
 
+#include <stdatomic.h>
+
 typedef void(*ThreadEntry)(void* context);
 
 #if defined(LC_WINDOWS)
@@ -10,28 +12,28 @@ typedef SRWLOCK PLT_MUTEX;
 typedef CONDITION_VARIABLE PLT_COND;
 typedef struct _PLT_THREAD {
     HANDLE handle;
-    bool cancelled;
+    atomic_bool cancelled;
 } PLT_THREAD;
 #elif defined(__WIIU__)
 typedef OSFastMutex PLT_MUTEX;
 typedef OSFastCondition PLT_COND;
 typedef struct _PLT_THREAD {
     OSThread thread;
-    int cancelled;
+    atomic_bool cancelled;
 } PLT_THREAD;
 #elif defined(__3DS__)
 typedef LightLock PLT_MUTEX;
 typedef CondVar PLT_COND;
 typedef struct _PLT_THREAD {
     Thread thread;
-    bool cancelled;
+    atomic_bool cancelled;
 } PLT_THREAD;
 #elif defined (LC_POSIX)
 typedef pthread_mutex_t PLT_MUTEX;
 typedef pthread_cond_t PLT_COND;
 typedef struct _PLT_THREAD {
     pthread_t thread;
-    bool cancelled;
+    atomic_bool cancelled;
 } PLT_THREAD;
 #else
 #error Unsupported platform
@@ -50,6 +52,7 @@ typedef struct _PLT_EVENT {
 int PltCreateMutex(PLT_MUTEX* mutex);
 void PltDeleteMutex(PLT_MUTEX* mutex);
 void PltLockMutex(PLT_MUTEX* mutex);
+bool PltTryLockMutex(PLT_MUTEX* mutex);
 void PltUnlockMutex(PLT_MUTEX* mutex);
 
 int PltCreateThread(const char* name, ThreadEntry entry, void* context, PLT_THREAD* thread);
@@ -67,7 +70,8 @@ void PltWaitForEvent(PLT_EVENT* event);
 int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
 void PltDeleteConditionVariable(PLT_COND* cond);
 void PltSignalConditionVariable(PLT_COND* cond);
+void PltBroadcastConditionVariable(PLT_COND* cond);
 void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
 
-void PltSleepMs(int ms);
-void PltSleepMsInterruptible(PLT_THREAD* thread, int ms);
+void PltSleepMs(uint32_t ms);
+void PltSleepMsInterruptible(PLT_THREAD* thread, uint32_t ms);

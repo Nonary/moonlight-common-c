@@ -40,7 +40,7 @@ endif()
 target_link_libraries(moonlight-common-c PRIVATE enet)
 
 if(MSVC)
-  target_compile_options(moonlight-common-c PRIVATE /W3 /wd4100 /wd4232 /wd5105 /WX)
+  target_compile_options(moonlight-common-c PRIVATE /W3 /wd4100 /wd4232 /wd5105 /WX /experimental:c11atomics)
   target_link_libraries(moonlight-common-c PRIVATE ws2_32.lib winmm.lib)
 elseif(MINGW)
   target_link_libraries(moonlight-common-c PRIVATE -lws2_32 -lwinmm)
@@ -79,36 +79,6 @@ else()
   endif()
 endif()
 
-if (NOT(MSVC OR APPLE))
-  include(CheckLibraryExists)
-  CHECK_LIBRARY_EXISTS(rt clock_gettime "" HAVE_CLOCK_GETTIME)
-
-  if (NOT HAVE_CLOCK_GETTIME)
-    set(CMAKE_EXTRA_INCLUDE_FILES time.h)
-    CHECK_FUNCTION_EXISTS(clock_gettime HAVE_CLOCK_GETTIME)
-    SET(CMAKE_EXTRA_INCLUDE_FILES)
-  endif()
-
-  foreach(clock CLOCK_MONOTONIC CLOCK_MONOTONIC_RAW)
-    message(STATUS "Testing whether ${clock} can be used")
-    CHECK_CXX_SOURCE_COMPILES(
-"#define _POSIX_C_SOURCE 200112L
-#include <time.h>
-int main ()
-{
-  struct timespec ts[1];
-  clock_gettime (${clock}, ts);
-  return 0;
-}" HAVE_${clock})
-    if(HAVE_${clock})
-    message(STATUS "Testing whether ${clock} can be used -- Success")
-    else()
-    message(STATUS "Testing whether ${clock} can be used -- Failed")
-    endif()
-  endforeach()
-
-endif()
-
 target_include_directories(moonlight-common-c SYSTEM PUBLIC src)
 
 target_include_directories(moonlight-common-c SYSTEM PRIVATE
@@ -121,6 +91,12 @@ target_compile_definitions(moonlight-common-c PRIVATE HAS_SOCKLEN_T)
 
 if (BUILD_ABI_REGRESSION_TESTS)
   enable_testing()
+
+  add_executable(test_video_merge tests/test_video_merge.c)
+  target_compile_definitions(test_video_merge PRIVATE $<TARGET_PROPERTY:moonlight-common-c,COMPILE_DEFINITIONS>)
+  target_include_directories(test_video_merge PRIVATE $<TARGET_PROPERTY:moonlight-common-c,INCLUDE_DIRECTORIES>)
+  target_link_libraries(test_video_merge PRIVATE moonlight-common-c enet)
+  add_test(NAME video_merge COMMAND test_video_merge)
 
   add_executable(test_speaker_owner_arrival tests/test_speaker_owner_arrival.c)
   target_compile_definitions(test_speaker_owner_arrival PRIVATE $<TARGET_PROPERTY:moonlight-common-c,COMPILE_DEFINITIONS>)

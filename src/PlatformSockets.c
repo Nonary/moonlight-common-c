@@ -149,17 +149,21 @@ int pollSockets(struct pollfd* pollFds, int pollFdsCount, int timeoutMs) {
 
     return err;
 #elif defined(__3DS__)
-    int err;
-    u64 poll_start = osGetTime();
-    // seems like timeoutMs is never negative
-    for (u64 i = poll_start; (i - poll_start) < (u64)timeoutMs; i = osGetTime()) {
-        err = poll(pollFds, pollFdsCount, 0); // This is running for 14ms
-        if (err) {
-            break;
+    if (timeoutMs > 0) {
+        int err;
+        u64 poll_start = osGetTime();
+        for (u64 i = poll_start; (i - poll_start) < (u64)timeoutMs; i = osGetTime()) {
+            err = poll(pollFds, pollFdsCount, 0); // This is running for 14ms
+            if (err) {
+                break;
+            }
+            svcSleepThread(1000);
         }
-        svcSleepThread(1000);
+        return err;
     }
-    return err;
+    else {
+        return poll(pollFds, pollFdsCount, timeoutMs);
+    }
 #else
     return poll(pollFds, pollFdsCount, timeoutMs);
 #endif
@@ -179,7 +183,8 @@ bool isSocketReadable(SOCKET s) {
     return true;
 }
 
-int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
+int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect,
+                  struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen) {
     int err;
 
     do {
@@ -196,13 +201,13 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
             }
 
             // This won't block since the socket is readable
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = (int)recvfrom(s, buffer, size, 0, (struct sockaddr*)remoteAddr, addrLen);
         }
         else {
             // The caller has already configured a timeout on this
             // socket via SO_RCVTIMEO, so we can avoid a syscall
             // for each packet.
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = (int)recvfrom(s, buffer, size, 0, (struct sockaddr*)remoteAddr, addrLen);
             if (err < 0 &&
                     (LastSocketError() == EWOULDBLOCK ||
                      LastSocketError() == EINTR ||
@@ -540,13 +545,13 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen, 
     if (dstaddr->ss_family == AF_INET) {
         int val = IP_PMTUDISC_DONT;
         if (setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, (char*)&val, sizeof(val)) < 0) {
-            Limelog("setsockopt(IP_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", val, (int)LastSocketError());
+            Limelog("setsockopt(IP_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", (int)LastSocketError());
         }
     }
     else {
         int val = IP_PMTUDISC_DONT;
         if (setsockopt(s, IPPROTO_IPV6, IPV6_MTU_DISCOVER, (char*)&val, sizeof(val)) < 0) {
-            Limelog("setsockopt(IPV6_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", val, (int)LastSocketError());
+            Limelog("setsockopt(IPV6_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", (int)LastSocketError());
         }
     }
 #elif defined(TCP_NOOPT)
@@ -645,7 +650,7 @@ int getLocalAddressByUdpConnect(const struct sockaddr_storage* targetAddr, SOCKA
     }
 
     memcpy(&connAddr, targetAddr, targetAddrLen);
-    SET_PORT(&connAddr, RtspPortNumber);
+    SET_PORT(&connAddr, targetPort);
 
     if (connect(udpSocket, (struct sockaddr*)&connAddr, targetAddrLen) < 0) {
         int err = LastSocketError();
@@ -814,7 +819,7 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
     int i;
 
     for (i = 0; i < prefixLength; i++) {
-        unsigned char mask = 1 << (i % 8);
+        unsigned char mask = 0x80 >> (i % 8);
         if ((sin6->sin6_addr.s6_addr[i / 8] & mask) != (subnet[i / 8] & mask)) {
             return false;
         }
