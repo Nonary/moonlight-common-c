@@ -46,7 +46,7 @@ static int dataPacket(unsigned char* packet, uint16_t sequence, int plainLength)
         memcpy(&keyId, initialIv, 4);
         keyId = BE32(BE32(keyId) + sequence);
         memcpy(iv, &keyId, 4);
-        PPLT_CRYPTO_CONTEXT ctx = PltCreateCryptoContext();
+        PPLT_CRYPTO_CONTEXT ctx = PltCreateCryptoContext(0);
         CHECK(ctx != NULL);
         if (ctx == NULL) return -1;
         CHECK(PltEncryptMessage(ctx, ALGORITHM_AES_CBC, CIPHER_FLAG_RESET_IV | CIPHER_FLAG_FINISH,
