@@ -9,6 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  controller-baseline-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          submodules: recursive
+      - uses: actions/checkout@v5
+        with:
+          repository: Nonary/moonlight-common-c
+          ref: 064a4af91a9ea7024894601978a62e5a2dbe13b9
+          path: baseline
+          submodules: recursive
+      - run: python3 candidate/tests/compare_controller_baseline.py candidate baseline
   linux-sanitizers:
     runs-on: ubuntu-latest
     steps:
