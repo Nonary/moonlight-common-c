@@ -18,11 +18,13 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
       - name: Build production Common and regression targets
         run: >-
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DBUILD_SHARED_LIBS=OFF -DBUILD_AUDIO_REGRESSION_TESTS=ON
           -DBUILD_ABI_REGRESSION_TESTS=ON
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      # Exercise production rejection paths with sanitizers and debug symbols.
+      # Debug transport assertions intentionally abort on malformed network fixtures.
       - run: cmake --build build --parallel 2
       - run: ctest --test-dir build --output-on-failure
   windows-native:
