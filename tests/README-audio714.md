@@ -1,5 +1,41 @@
 # Discrete 7.1.4 protocol and receiver regression tests
 
+## Current upstream submission
+
+This port is based on Nonary master `064a4af91a9ea7024894601978a62e5a2dbe13b9`.
+It retains that revision's atomic audio receive state, crypto context API,
+video merge behavior and callback/controller extensions. It does not replace
+the current upstream tree with the older private reference below.
+
+On the Windows laboratory build, all ten current CTest targets pass, including
+the six upstream callback/controller/video ABI cases, production audio parsing
+and replay, all 10,836 FEC arrival combinations (130,032 payload checks),
+deadline/wrap cases and the data8,data9,parity,data10 reproducer. The new
+workflow repeats these on Windows and Linux (Linux with ASan/UBSan).
+Hosted CI status must be checked separately; a local pass is not a hosted pass.
+
+There is no DSP, height synthesis, dynamic object rendering or USB device
+implementation in this Common change. Existing 2/6/8-channel offers retain
+their legacy packed SDP and custom Opus mapping rules. Twelve channels require
+an explicit valid offer; an old peer is rejected with the unsupported-layout
+error rather than silently reducing the requested native channel count.
+
+Both Common and consumers must be rebuilt together because the Opus mapping
+array grows. The tests preserve the existing versioned callback ABI. The
+fresh-after-ping extension is honored only for an explicitly advertising
+Sunshine-compatible peer; ordinary peers retain their startup synchronization.
+
+Build with `-DBUILD_AUDIO_REGRESSION_TESTS=ON -DBUILD_ABI_REGRESSION_TESTS=ON`,
+then run CTest. `fec_latency` is an optional timing experiment, not a universal
+network or speaker-latency claim. No previous hardware/lab result is relabeled
+as a result of these newly ported binaries.
+
+The remainder records the private reference contract and earlier diagnostics.
+In particular, its static-analysis findings and old source pin refer to that
+reference, not a new clean-analysis claim for the current upstream build.
+
+## Preserved reference contract and provenance
+
 The client keeps the Nonary Common baseline
 `3f9c009fe01db573cd29c1f286db5b7fa8a922fc`; it does not replace it with
 Foundation's Common fork. App and Common must be rebuilt together:
