@@ -640,7 +640,7 @@ static bool playStream(PRTSP_MESSAGE response, char* target, int* error) {
 }
 
 // Send RTSP ANNOUNCE message
-static bool sendVideoAnnounce(PRTSP_MESSAGE response, int* error) {
+static bool sendVideoAnnounce(PRTSP_MESSAGE response, int* error, bool pyrowaveVersionFallback) {
     RTSP_MESSAGE request;
     bool ret;
     int payloadLength;
@@ -658,6 +658,11 @@ static bool sendVideoAnnounce(PRTSP_MESSAGE response, int* error) {
             goto FreeMessage;
         }
 
+        if (pyrowaveVersionFallback) {
+            // Diagnostic only. A failed optional header allocation leaves the
+            // standard ANNOUNCE usable.
+            (void)addOption(&request, "X-Amaterasu-Codec-Fallback", "pyrowave_bitstream_mismatch");
+        }
         request.payload = getSdpPayloadForStreamConfig(rtspClientVersion, &payloadLength);
         if (request.payload == NULL) {
             goto FreeMessage;
@@ -845,6 +850,7 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
 // Perform RTSP Handshake with the streaming server machine as part of the connection process
 int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     int ret;
+    bool pyrowaveVersionFallback = false;
 
     LC_ASSERT(RtspPortNumber != 0);
 
@@ -994,11 +1000,38 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         parseSdpAttributeToToken(response.payload, "x-ss-pyrowave.bitstream",
                                  hostPyroWaveBitstreamId, sizeof(hostPyroWaveBitstreamId));
 
-        // PyroWave is only ever requested explicitly by the client, so it takes
-        // precedence whenever the host advertises it. Some PyroWave hosts omit the
-        // "PYROWAVE/90000" DESCRIBE marker, so the capability bits decide.
-        if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) &&
-                (serverInfo->serverCodecModeSupport & SCM_PYROWAVE)) {
+        // Amaterasu probes the extension for each launch. Its SDP advertises
+        // a bitstream revision only when this ticket can use PyroWave.
+        // Older Sunshine hosts may omit it, so retain their capability rule.
+        const bool launchScopedOffer = strstr(response.payload, "\r\ns=Amaterasu\r\n") != NULL;
+        const bool wantsPyroWave = (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) != 0;
+        const bool offeredPyroWave = (serverInfo->serverCodecModeSupport & SCM_PYROWAVE) &&
+            (!launchScopedOffer || strcmp(hostPyroWaveBitstreamId, PYROWAVE_BITSTREAM_ID) == 0);
+        const bool pyrowaveFallback = wantsPyroWave && launchScopedOffer && !offeredPyroWave;
+        bool offeredAv1 = (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000");
+        bool offeredHevc = (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_H265) && strstr(response.payload, "sprop-parameter-sets=AAAAAU");
+        if (pyrowaveFallback) {
+            pyrowaveVersionFallback = hostPyroWaveBitstreamId[0] != '\0' &&
+                strcmp(hostPyroWaveBitstreamId, PYROWAVE_BITSTREAM_ID) != 0;
+            Limelog("PyroWave unavailable for this launch; negotiating a standard video codec\n");
+            // The launch's HDR mode was chosen using this same client mask.
+            // Only negotiate an HDR-capable substitute for an HDR launch.
+            if (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) {
+                offeredAv1 = offeredAv1 &&
+                    (((serverInfo->serverCodecModeSupport & SCM_AV1_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10)) ||
+                     ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)));
+                offeredHevc = offeredHevc &&
+                    (((serverInfo->serverCodecModeSupport & SCM_HEVC_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10)) ||
+                     ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444)));
+                if (!offeredAv1 && !offeredHevc) {
+                    Limelog("No compatible 10-bit codec in the launch offer\n");
+                    freeMessage(&response);
+                    ret = 406;
+                    goto Exit;
+                }
+            }
+        }
+        if (wantsPyroWave && offeredPyroWave) {
             if ((serverInfo->serverCodecModeSupport & SCM_PYROWAVE_HDR10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10_444)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_HDR10_444;
             }
@@ -1020,7 +1053,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                         hostPyroWaveBitstreamId, PYROWAVE_BITSTREAM_ID);
             }
         }
-        else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
+        else if (offeredAv1) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
             }
@@ -1034,7 +1067,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_MAIN8;
             }
         }
-        else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_H265) && strstr(response.payload, "sprop-parameter-sets=AAAAAU")) {
+        else if (offeredHevc) {
             // The RTSP DESCRIBE reply will contain a collection of SDP media attributes that
             // describe the various supported video stream formats and include the SPS, PPS,
             // and VPS (if applicable). We will use this information to determine whether the
@@ -1272,7 +1305,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         RTSP_MESSAGE response;
         int error = -1;
 
-        if (!sendVideoAnnounce(&response, &error)) {
+        if (!sendVideoAnnounce(&response, &error, pyrowaveVersionFallback)) {
             Limelog("RTSP ANNOUNCE request failed: %d\n", error);
             ret = error;
             goto Exit;
