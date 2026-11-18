@@ -14,6 +14,10 @@ typedef struct _reed_solomon reed_solomon;
 #define RTPA_FEC_SHARDS 2
 #define RTPA_TOTAL_SHARDS (RTPA_DATA_SHARDS + RTPA_FEC_SHARDS)
 
+// Entire UDP payload, including RTP and (when present) the audio FEC header.
+// Keep the network limit independent of codec bitrate or channel count.
+#define RTPA_MAX_PACKET_SIZE 1400
+
 // Maximum number of FEC block entries to cache
 #define RTPA_CACHED_FEC_BLOCK_LIMIT 4
 
@@ -73,6 +77,7 @@ typedef struct _RTP_AUDIO_QUEUE {
 
     uint16_t lastOosSequenceNumber;
     bool receivedOosData;
+    bool initialSequenceKnown;
     bool synchronizing;
     bool incompatibleServer;
 

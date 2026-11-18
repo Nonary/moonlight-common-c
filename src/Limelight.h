@@ -233,15 +233,22 @@ typedef struct _DECODE_UNIT {
 // Specifies that the audio stream should be in 7.1 surround sound if the PC is able
 #define AUDIO_CONFIGURATION_71_SURROUND MAKE_AUDIO_CONFIGURATION(8, 0x63F)
 
+// Foundation wire layout: FL FR FC LFE BL BR SL SR TFL TFR TBL TBR.
+// 0xF63F is a protocol identifier, NOT the native Windows WAVE mask 0x2D63F
+// or the Windows Spatial Audio object mask. Rebuild clients for the 12-byte
+// OPUS_MULTISTREAM_CONFIGURATION.mapping ABI below.
+#define AUDIO_CONFIGURATION_714_SURROUND MAKE_AUDIO_CONFIGURATION(12, 0xF63F)
+
 // Specifies an audio configuration by channel count and channel mask
-// See https://docs.microsoft.com/en-us/windows-hardware/drivers/audio/channel-mask for channelMask values
+// Legacy channelMask values follow Windows speaker bits; extensions may use
+// protocol-specific identifiers. Only the low 16 wire bits are represented.
 // NOTE: Not all combinations are supported by GFE and/or this library.
 #define MAKE_AUDIO_CONFIGURATION(channelCount, channelMask) \
-    (((channelMask) << 16) | (channelCount << 8) | 0xCA)
+    ((((uint32_t)(channelMask) & 0xFFFFU) << 16) | (((uint32_t)(channelCount) & 0xFFU) << 8) | 0xCAU)
 
 // Helper macros for retreiving channel count and channel mask from the audio configuration
-#define CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x) (((x) >> 8) & 0xFF)
-#define CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(x) (((x) >> 16) & 0xFFFF)
+#define CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x) (((uint32_t)(x) >> 8) & 0xFFU)
+#define CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(x) (((uint32_t)(x) >> 16) & 0xFFFFU)
 
 // Helper macro to retreive the surroundAudioInfo parameter value that must be passed in
 // the /launch and /resume HTTPS requests when starting the session.
@@ -249,7 +256,10 @@ typedef struct _DECODE_UNIT {
     (CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(x) << 16 | CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x))
 
 // The maximum number of channels supported
-#define AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT 8
+#define AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT 12
+
+// RTSP DESCRIBE did not offer the requested discrete 7.1.4 Opus profile.
+#define ML_ERROR_UNSUPPORTED_AUDIO_CONFIGURATION -105
 
 // Passed in StreamConfiguration.supportedVideoFormats to specify supported codecs
 // and to DecoderRendererSetup() to specify selected codec.
@@ -383,6 +393,10 @@ void LiInitializeVideoCallbacks(PDECODER_RENDERER_CALLBACKS drCallbacks);
 // 5 - Back Right
 // 6 - Side Left
 // 7 - Side Right
+// 8 - Top Front Left (7.1.4)
+// 9 - Top Front Right (7.1.4)
+// 10 - Top Back Left (7.1.4)
+// 11 - Top Back Right (7.1.4)
 //
 // If the mapping order does not match the channel order of the audio renderer, you may swap
 // the values in the mismatched indices until the mapping array matches the desired channel order.
