@@ -1,6 +1,7 @@
 #include "Limelight-internal.h"
 #include "ControllerHaptics.h"
 #include "ControllerSpeakerPcm.h"
+#include "ControllerDualSense.h"
 #include <inttypes.h>
 
 #define MAX_OPTION_NAME_LEN 128
@@ -275,6 +276,8 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         if (ListenerCallbacks.controllerHaptics) moonlightFeatureFlags |= ML_FF_HAPTICS_PCM;
         if (ControllerSpeakerPcmCallback)
             moonlightFeatureFlags |= ML_FF_CONTROLLER_SPEAKER_PCM;
+        if (DualSenseOutputCallback)
+            moonlightFeatureFlags |= ML_FF_DUALSENSE_CONTROLS;
         snprintf(payloadStr, sizeof(payloadStr), "%" PRIu32, moonlightFeatureFlags);
         err |= addAttributeString(&optionHead, "x-ml-general.featureFlags", payloadStr);
 

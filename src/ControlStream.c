@@ -1,6 +1,7 @@
 #include "Limelight-internal.h"
 #include "ControllerHaptics.h"
 #include "ControllerSpeakerPcm.h"
+#include "ControllerDualSense.h"
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -107,6 +108,7 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
             uint8_t count;
             uint8_t triples[STEAM_SETTINGS_PAYLOAD_SIZE];
         } steamSettings;
+        ML_DUALSENSE_OUTPUT dualSenseOutput;
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
 } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
@@ -173,6 +175,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 // Settings chunks queued for the listener at most; a burst of haptic events never evicts one
 // (a 20-triple write arrives as three chunks, and a dropped chunk is a partial write applied).
 #define STEAM_SETTINGS_QUEUE_LIMIT 16
+#define IDX_DUALSENSE_OUTPUT 15
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -193,6 +196,7 @@ static const short packetTypesGen3[] = {
     -1,     // Adaptive triggers (unused)
     -1,     // Steam Controller haptic report (unused)
     -1,     // Steam Controller settings write (unused)
+    -1,     // DualSense extended output (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -210,6 +214,7 @@ static const short packetTypesGen4[] = {
     -1,     // Adaptive triggers (unused)
     -1,     // Steam Controller haptic report (unused)
     -1,     // Steam Controller settings write (unused)
+    -1,     // DualSense extended output (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -227,6 +232,7 @@ static const short packetTypesGen5[] = {
     -1,     // Adaptive triggers (unused)
     -1,     // Steam Controller haptic report (unused)
     -1,     // Steam Controller settings write (unused)
+    -1,     // DualSense extended output (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -244,6 +250,7 @@ static const short packetTypesGen7[] = {
     -1,     // Adaptive triggers (unused)
     -1,     // Steam Controller haptic report (unused)
     -1,     // Steam Controller settings write (unused)
+    -1,     // DualSense extended output (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -261,6 +268,7 @@ static const short packetTypesGen7Enc[] = {
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
     0x5504, // Steam Controller haptic report (Vibepollo protocol extension)
     0x5505, // Steam Controller settings write (Vibepollo protocol extension)
+    ML_DUALSENSE_OUTPUT_PACKET_TYPE, // 0x5506: DualSense extended output (Vibepollo protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -1204,6 +1212,17 @@ static void asyncCallbackThreadFunc(void* context) {
                                       queuedCb->data.steamSettings.triples);
             }
             break;
+        case IDX_DUALSENSE_OUTPUT:
+            if (DualSenseOutputCallback) {
+                DualSenseOutputCallback(queuedCb->data.dualSenseOutput.controllerNumber,
+                                        queuedCb->data.dualSenseOutput.validMask,
+                                        queuedCb->data.dualSenseOutput.playerLeds,
+                                        queuedCb->data.dualSenseOutput.ledBrightness,
+                                        queuedCb->data.dualSenseOutput.micLed,
+                                        queuedCb->data.dualSenseOutput.speakerVolume,
+                                        queuedCb->data.dualSenseOutput.headphoneVolume);
+            }
+            break;
         default:
             // Unhandled packet type from queueAsyncCallback()
             LC_ASSERT(false);
@@ -1222,7 +1241,8 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_HDR_INFO] ||
            packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
            packetType == packetTypes[IDX_STEAM_HAPTIC] ||
-           packetType == packetTypes[IDX_STEAM_SETTINGS];
+           packetType == packetTypes[IDX_STEAM_SETTINGS] ||
+           packetType == packetTypes[IDX_DUALSENSE_OUTPUT];
 }
 
 // Return a stop key including both report family and actuator mask.
@@ -1268,6 +1288,11 @@ static uint32_t asyncCallbackStateKey(void* value) {
         break;
     case IDX_HDR_INFO: break;
     case IDX_STEAM_SETTINGS: return 0;  // never coalesced (each chunk carries distinct ids); bounded on its own
+    case IDX_DUALSENSE_OUTPUT:
+        controller = cb->data.dualSenseOutput.controllerNumber;
+        subkey = cb->data.dualSenseOutput.validMask & ML_DS_OUT_ALL_MASK;
+        if (subkey == 0) return 0;
+        break;
     default: return 0;
     }
     if (controller >= 16) return 0;
@@ -1379,6 +1404,16 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
             return;
         }
         queuedCb->typeIndex = IDX_STEAM_SETTINGS;
+    }
+    else if (ctlHdr->type == packetTypes[IDX_DUALSENSE_OUTPUT]) {
+        if (DualSenseOutputCallback == NULL ||
+                !MlDualSenseOutputParse((const uint8_t*)(ctlHdr + 1),
+                                        (size_t)(packetLength - (int)sizeof(*ctlHdr)),
+                                        &queuedCb->data.dualSenseOutput)) {
+            free(queuedCb);
+            return;
+        }
+        queuedCb->typeIndex = IDX_DUALSENSE_OUTPUT;
     }
     else {
         // Unhandled packet type from needsAsyncCallback()

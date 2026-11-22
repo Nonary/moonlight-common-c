@@ -25,6 +25,7 @@ extern CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
 extern ConnListenerControllerSpeakerPcm ControllerSpeakerPcmCallback;
 extern ConnListenerSteamHaptic SteamHapticCallback;
 extern ConnListenerSteamSettings SteamSettingsCallback;
+extern ConnListenerDualSenseOutput DualSenseOutputCallback;
 extern DECODER_RENDERER_CALLBACKS VideoCallbacks;
 extern AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 extern int NegotiatedVideoFormat;

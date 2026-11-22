@@ -573,6 +573,16 @@ typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length
 #define STEAM_SETTINGS_LOAD_DEFAULTS 0x8E
 typedef void(*ConnListenerSteamSettings)(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t *triples);
 
+// Vibepollo/Artemide extension: DualSense extended output controls (player LEDs, LED brightness,
+// mute button LED, speaker volume, headphone volume) forwarded from the virtual DualSense HID
+// output report. Registered via LiSetDualSenseOutputCallback() before LiStartConnection*();
+// registering a non-NULL callback advertises ML_FF_DUALSENSE_CONTROLS (0x10) in SDP.
+typedef void(*ConnListenerDualSenseOutput)(uint16_t controllerNumber, uint16_t validMask,
+    uint8_t playerLeds, uint8_t ledBrightness, uint8_t micLed,
+    uint8_t speakerVolume, uint8_t headphoneVolume);
+
+void LiSetDualSenseOutputCallback(ConnListenerDualSenseOutput callback);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
