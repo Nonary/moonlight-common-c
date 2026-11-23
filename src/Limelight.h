@@ -950,6 +950,10 @@ int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activ
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
+// Reports DualSense 3.5 mm audio jack / headset mic / mute state to a Sunshine-derived host.
+// Bitmask values are defined in ControllerDualSense.h (ML_DS_AUDIO_*).
+int LiSendDualSenseAudioStatusEvent(uint8_t controllerNumber, uint8_t flags);
+
 // This function is similar to LiSendTouchEvent(), but the touch events are associated with a
 // touchpad device present on a game controller instead of a touchscreen.
 //
