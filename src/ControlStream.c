@@ -2,6 +2,7 @@
 #include "ControllerHaptics.h"
 #include "ControllerSpeakerPcm.h"
 #include "ControllerDualSense.h"
+#include "ControllerMic.h"
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -2493,4 +2494,32 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
     PltUnlockMutex(&hdrMutex);
 
     return true;
+}
+int LiSendControllerMicAudio(uint8_t controllerNumber, uint32_t sequence, uint16_t sampleCount,
+                             const uint8_t* opusData, uint16_t opusLength) {
+    uint8_t packet[ML_CONTROLLER_MIC_MAX_PACKET_SIZE];
+    size_t packetSize;
+
+    if (!IS_SUNSHINE() || !ControllerMicEnabled) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    if (stopping || !encryptedControlStream || (AppVersionQuad[0] >= 5 && peer == NULL)) {
+        return -2;
+    }
+
+    packetSize = MlMicBuildPacket(packet, sizeof(packet), controllerNumber, sequence,
+                                  sampleCount, opusData, opusLength);
+    if (packetSize == 0) {
+        return -1;
+    }
+
+    return sendMessageAndForget(
+        (short)ML_CONTROLLER_MIC_PACKET_TYPE,
+        (unsigned int)packetSize,
+        packet,
+        (uint8_t)(CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber),
+        ENET_PACKET_FLAG_UNSEQUENCED,
+        false
+    ) ? 0 : -1;
 }

@@ -954,6 +954,16 @@ int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepa
 // Bitmask values are defined in ControllerDualSense.h (ML_DS_AUDIO_*).
 int LiSendDualSenseAudioStatusEvent(uint8_t controllerNumber, uint8_t flags);
 
+// Enables or disables advertising ML_FF_CONTROLLER_MIC_AUDIO in the RTSP SDP handshake
+// and allowing LiSendControllerMicAudio() packets. Must be called before LiStartConnection*().
+void LiSetControllerMicEnabled(bool enabled);
+
+// Sends an Opus-encoded 48 kHz mono controller microphone audio frame to a Sunshine-derived host.
+// Sent unsequenced over the encrypted control stream. Returns 0 on success, LI_ERR_UNSUPPORTED
+// if disabled or non-Sunshine host, -2 if not connected, or -1 on invalid arguments / send error.
+int LiSendControllerMicAudio(uint8_t controllerNumber, uint32_t sequence, uint16_t sampleCount,
+                             const uint8_t* opusData, uint16_t opusLength);
+
 // This function is similar to LiSendTouchEvent(), but the touch events are associated with a
 // touchpad device present on a game controller instead of a touchscreen.
 //
