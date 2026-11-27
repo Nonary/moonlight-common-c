@@ -573,6 +573,16 @@ typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length
 #define STEAM_SETTINGS_LOAD_DEFAULTS 0x8E
 typedef void(*ConnListenerSteamSettings)(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t *triples);
 
+// Vibepollo/Artemide extension: DualSense extended output controls (player LEDs, LED brightness,
+// mute button LED, speaker volume, headphone volume) forwarded from the virtual DualSense HID
+// output report. Registered via LiSetDualSenseOutputCallback() before LiStartConnection*();
+// registering a non-NULL callback advertises ML_FF_DUALSENSE_CONTROLS (0x10) in SDP.
+typedef void(*ConnListenerDualSenseOutput)(uint16_t controllerNumber, uint16_t validMask,
+    uint8_t playerLeds, uint8_t ledBrightness, uint8_t micLed,
+    uint8_t speakerVolume, uint8_t headphoneVolume);
+
+void LiSetDualSenseOutputCallback(ConnListenerDualSenseOutput callback);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -939,6 +949,20 @@ int LiSendControllerSpeakerArrivalEvent(uint8_t controllerNumber, uint16_t activ
 
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
+
+// Reports DualSense 3.5 mm audio jack / headset mic / mute state to a Sunshine-derived host.
+// Bitmask values are defined in ControllerDualSense.h (ML_DS_AUDIO_*).
+int LiSendDualSenseAudioStatusEvent(uint8_t controllerNumber, uint8_t flags);
+
+// Enables or disables advertising ML_FF_CONTROLLER_MIC_AUDIO in the RTSP SDP handshake
+// and allowing LiSendControllerMicAudio() packets. Must be called before LiStartConnection*().
+void LiSetControllerMicEnabled(bool enabled);
+
+// Sends an Opus-encoded 48 kHz mono controller microphone audio frame to a Sunshine-derived host.
+// Sent unsequenced over the encrypted control stream. Returns 0 on success, LI_ERR_UNSUPPORTED
+// if disabled or non-Sunshine host, -2 if not connected, or -1 on invalid arguments / send error.
+int LiSendControllerMicAudio(uint8_t controllerNumber, uint32_t sequence, uint16_t sampleCount,
+                             const uint8_t* opusData, uint16_t opusLength);
 
 // This function is similar to LiSendTouchEvent(), but the touch events are associated with a
 // touchpad device present on a game controller instead of a touchscreen.

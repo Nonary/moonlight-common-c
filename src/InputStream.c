@@ -1,5 +1,6 @@
 #include "Limelight-internal.h"
 #include "ControllerSpeakerPcm.h"
+#include "ControllerDualSense.h"
 
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
@@ -77,6 +78,7 @@ typedef struct _PACKET_HOLDER {
         SS_PEN_PACKET pen;
         SS_CONTROLLER_ARRIVAL_PACKET controllerArrival;
         uint8_t controllerSpeakerBinding[ML_SPEAKER_BIND_SIZE];
+        uint8_t dualSenseAudioStatus[ML_DUALSENSE_AUDIO_STATUS_SIZE];
         SS_CONTROLLER_TOUCH_PACKET controllerTouch;
         SS_CONTROLLER_MOTION_PACKET controllerMotion;
         SS_CONTROLLER_BATTERY_PACKET controllerBattery;
@@ -1832,6 +1834,46 @@ int LiSendSteamControllerAttributesEvent(uint8_t controllerNumber, const LI_STEA
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
     if (err != LBQ_SUCCESS) {
         LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);  // interrupted while stopping
+        Limelog("Input queue reached maximum size limit\n");
+        freePacketHolder(holder);
+    }
+
+    return err;
+}
+
+int LiSendDualSenseAudioStatusEvent(uint8_t controllerNumber, uint8_t flags) {
+    PPACKET_HOLDER holder;
+    int err;
+
+    if (!atomic_load_explicit(&initialized, memory_order_acquire)) {
+        return -2;
+    }
+
+    if (!IS_SUNSHINE()) {
+        return LI_ERR_UNSUPPORTED;
+    }
+
+    if (controllerNumber >= MAX_GAMEPADS || (flags & ~ML_DS_AUDIO_STATUS_MASK) != 0) {
+        return -1;
+    }
+
+    holder = allocatePacketHolder(0);
+    if (holder == NULL) {
+        return -1;
+    }
+
+    holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE + controllerNumber;
+    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+    if (!MlDualSenseAudioStatusBuild(holder->packet.dualSenseAudioStatus,
+                                     ML_DUALSENSE_AUDIO_STATUS_SIZE,
+                                     controllerNumber, flags)) {
+        freePacketHolder(holder);
+        return -1;
+    }
+
+    err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err != LBQ_SUCCESS) {
+        LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);
         Limelog("Input queue reached maximum size limit\n");
         freePacketHolder(holder);
     }

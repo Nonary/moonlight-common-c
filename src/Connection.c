@@ -17,6 +17,8 @@ CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
 ConnListenerControllerSpeakerPcm ControllerSpeakerPcmCallback;
 ConnListenerSteamHaptic SteamHapticCallback;
 ConnListenerSteamSettings SteamSettingsCallback;
+ConnListenerDualSenseOutput DualSenseOutputCallback;
+bool ControllerMicEnabled;
 DECODER_RENDERER_CALLBACKS VideoCallbacks;
 AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 int NegotiatedVideoFormat;
@@ -582,6 +584,14 @@ int LiStartConnectionWithSteamController(PSERVER_INFORMATION serverInfo, PSTREAM
     ConnListenerSteamSettings steamSettingsCallback) {
     return LiStartConnectionInternal(serverInfo, streamConfig, clCallbacks, drCallbacks, arCallbacks, renderContext,
         drFlags, audioContext, arFlags, speakerPcmCallback, steamHapticCallback, steamSettingsCallback);
+}
+
+void LiSetDualSenseOutputCallback(ConnListenerDualSenseOutput callback) {
+    DualSenseOutputCallback = callback;
+}
+
+void LiSetControllerMicEnabled(bool enabled) {
+    ControllerMicEnabled = enabled;
 }
 
 const char* LiGetLaunchUrlQueryParameters(void) {
