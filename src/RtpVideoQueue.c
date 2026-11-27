@@ -36,6 +36,11 @@
 #define PYROWAVE_LATE_TAIL_SILENCE_US 1200
 
 static LiVideoReassemblyDeadlineCallback reassemblyDeadlineCallback;
+static LiVideoFrameStartCallback frameStartCallback;
+
+void LiSetVideoFrameStartCallback(LiVideoFrameStartCallback callback) {
+    frameStartCallback = callback;
+}
 
 void LiSetVideoReassemblyDeadlineCallback(LiVideoReassemblyDeadlineCallback callback) {
     reassemblyDeadlineCallback = callback;
@@ -1001,6 +1006,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         // Update total missing packet count
         if (queue->pendingFecBlockList.count == 1) {
             // Initialize counts and highest seqnum on the first packet
+            if (fecCurrentBlockNumber == 0 && frameStartCallback != NULL) {
+                frameStartCallback(nvPacket->frameIndex, packet->timestamp);
+            }
             LC_ASSERT(queue->missingPackets == 0);
             LC_ASSERT(queue->receivedHighestSequenceNumber == 0);
             queue->missingPackets += U16(packet->sequenceNumber - queue->bufferLowestSequenceNumber);

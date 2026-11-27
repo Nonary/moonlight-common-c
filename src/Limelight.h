@@ -1061,6 +1061,11 @@ uint64_t LiGetMillis(void);
 typedef uint64_t (*LiVideoReassemblyDeadlineCallback)(uint32_t rtpTimestamp);
 void LiSetVideoReassemblyDeadlineCallback(LiVideoReassemblyDeadlineCallback callback);
 
+// Called on the receive thread at the first accepted packet of a new frame.
+// Install before starting the connection. The callback must not wait for rendering.
+typedef void (*LiVideoFrameStartCallback)(uint32_t frameNumber, uint32_t rtpTimestamp);
+void LiSetVideoFrameStartCallback(LiVideoFrameStartCallback callback);
+
 // This is a simplistic STUN function that can assist clients in getting the WAN address
 // for machines they find using mDNS over IPv4. This can be used to pre-populate the external
 // address for streaming after GFE stopped sending it a while back. wanAddr is returned in
