@@ -1,0 +1,67 @@
+name: Native audio and FEC regressions
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controller-baseline-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          submodules: recursive
+      - uses: actions/checkout@v5
+        with:
+          repository: Nonary/moonlight-common-c
+          ref: 6f05ee8947d1b2d7b69fd4983029d0447e521997
+          path: baseline
+          submodules: recursive
+      - run: python3 candidate/tests/compare_controller_baseline.py candidate baseline
+  linux-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+      - name: Build production Common and regression targets
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DBUILD_SHARED_LIBS=OFF -DBUILD_AUDIO_REGRESSION_TESTS=ON
+          -DBUILD_ABI_REGRESSION_TESTS=ON
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      # Exercise production rejection paths with sanitizers and debug symbols.
+      # Debug transport assertions intentionally abort on malformed network fixtures.
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+  windows-native:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
+      - run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_SHARED_LIBS=OFF -DBUILD_AUDIO_REGRESSION_TESTS=ON
+          -DBUILD_ABI_REGRESSION_TESTS=ON
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure

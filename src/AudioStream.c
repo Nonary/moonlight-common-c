@@ -17,13 +17,14 @@ static unsigned short lastSeq;
 static bool pingThreadStarted;
 static atomic_bool receivedDataFromPeer; // Read by stopAudioStream()
 static uint64_t firstReceiveTime;
+bool FreshAudioAfterPing;
 
 #ifdef LC_DEBUG
 #define INVALID_OPUS_HEADER 0x00
 static uint8_t opusHeaderByte;
 #endif
 
-#define MAX_PACKET_SIZE 1400
+#define MAX_PACKET_SIZE RTPA_MAX_PACKET_SIZE
 
 typedef struct _QUEUE_AUDIO_PACKET_HEADER {
     LINKED_BLOCKING_QUEUE_ENTRY lentry;
@@ -49,6 +50,7 @@ static void AudioPingThreadProc(void* context) {
     // issues related to receiving ICMP port unreachable messages due
     // to sending a packet prior to the host PC binding to that port.
     int pingCount = 0;
+    int earlyRetries = FreshAudioAfterPing ? 4 : 0;
     while (!PltIsThreadInterrupted(&udpPingThread)) {
         if (AudioPingPayload.payload[0] != 0) {
             pingCount++;
@@ -60,7 +62,8 @@ static void AudioPingThreadProc(void* context) {
             sendto(rtpSocket, legacyPingData, sizeof(legacyPingData), 0, (struct sockaddr*)&saddr, AddrLen);
         }
 
-        PltSleepMsInterruptible(&udpPingThread, 500);
+        PltSleepMsInterruptible(&udpPingThread, earlyRetries > 0 ? 20 : 500);
+        if (earlyRetries > 0) earlyRetries--;
     }
 }
 
@@ -73,6 +76,7 @@ int initializeAudioStream(void) {
     pingThreadStarted = false;
     firstReceiveTime = 0;
     audioDecryptionCtx = PltCreateCryptoContext(0);
+    FreshAudioAfterPing = false;
 #ifdef LC_DEBUG
     opusHeaderByte = INVALID_OPUS_HEADER;
 #endif
@@ -100,6 +104,7 @@ int notifyAudioPortNegotiationComplete(void) {
 
     // We may receive audio before our threads are started, but that's okay. We'll
     // drop the first 1 second of audio packets to catch up with the backlog.
+    if (FreshAudioAfterPing) return 0;
     int err = PltCreateThread("AudioPing", AudioPingThreadProc, NULL, &udpPingThread);
     if (err != 0) {
         return err;
@@ -168,6 +173,8 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
         return;
     }
 
+    if (packet->header.size <= (int)sizeof(RTP_PACKET) || packet->header.size > MAX_PACKET_SIZE) return;
+
     PRTP_PACKET rtp = (PRTP_PACKET)&packet->data[0];
     if (lastSeq != 0 && (unsigned short)(lastSeq + 1) != rtp->sequenceNumber) {
         Limelog("Network dropped audio data (expected %d, but received %d)\n", lastSeq + 1, rtp->sequenceNumber);
@@ -180,6 +187,8 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
         // We must have room for the AES padding which may be written to the buffer
         unsigned char decryptedOpusData[ROUND_TO_PKCS7_PADDED_LEN(MAX_PACKET_SIZE)];
         unsigned char iv[16] = { 0 };
+
+        if (dataLength % 16 != 0) return;
 
         LC_ASSERT(dataLength <= MAX_PACKET_SIZE);
 
@@ -200,7 +209,7 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
             return;
         }
 
-        if (dataLength == 0) {
+        if (dataLength <= 0) {
             LC_ASSERT_VT(false);
             return;
         }
@@ -246,16 +255,57 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
     }
 }
 
+// Shared by the socket receiver and the local test-only replay adapter.
+static bool submitAudioPacket(PQUEUED_AUDIO_PACKET* packet) {
+    if ((*packet)->header.size < (int)sizeof(RTP_PACKET) || (*packet)->header.size > MAX_PACKET_SIZE) return true;
+    PRTP_PACKET rtp = (PRTP_PACKET)(*packet)->data;
+    rtp->sequenceNumber = BE16(rtp->sequenceNumber);
+    rtp->timestamp = BE32(rtp->timestamp);
+    rtp->ssrc = BE32(rtp->ssrc);
+    int status = RtpaAddPacket(&rtpAudioQueue, rtp, (uint16_t)(*packet)->header.size);
+    if (RTPQ_HANDLE_NOW(status)) {
+        if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+            if (!queuePacketToLbq(packet)) return false;
+        }
+        else decodeInputData(*packet);
+    }
+    else if (RTPQ_PACKET_CONSUMED(status)) {
+        // Ownership was transferred to the RTP queue.
+        *packet = NULL;
+    }
+
+    // An in-order packet can close a gap in front of buffered OOS packets.
+    // Drain those immediately too, including when the new packet used the
+    // direct-submit fast path. Waiting for another datagram adds latency and
+    // can strand the last packets of a burst indefinitely.
+    if (RTPQ_HANDLE_NOW(status) || RTPQ_PACKET_READY(status)) {
+        uint16_t length;
+        PQUEUED_AUDIO_PACKET queued;
+        while ((queued = (PQUEUED_AUDIO_PACKET)RtpaGetQueuedPacket(&rtpAudioQueue, sizeof(QUEUED_AUDIO_PACKET_HEADER), &length)) != NULL) {
+            queued->header.size = length;
+            if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
+                if (!queuePacketToLbq(&queued)) {
+                    free(queued);
+                    return false;
+                }
+            }
+            else {
+                decodeInputData(queued);
+                free(queued);
+            }
+        }
+    }
+    return true;
+}
 static void AudioReceiveThreadProc(void* context) {
     PRTP_PACKET rtp;
     PQUEUED_AUDIO_PACKET packet;
-    int queueStatus;
     bool useSelect;
     uint32_t packetsToDrop;
     int waitingForAudioMs;
 
     packet = NULL;
-    packetsToDrop = 500 / AudioPacketDuration;
+    packetsToDrop = FreshAudioAfterPing ? 0 : 500 / AudioPacketDuration;
 
     if (setNonFatalRecvTimeoutMs(rtpSocket, UDP_RECV_POLL_TIMEOUT_MS) < 0) {
         // SO_RCVTIMEO failed, so use select() to wait
@@ -308,12 +358,6 @@ static void AudioReceiveThreadProc(void* context) {
         if (!atomic_exchange_explicit(&receivedDataFromPeer, true, memory_order_relaxed)) {
             Limelog("Received first audio packet after %d ms\n", waitingForAudioMs);
 
-            if (firstReceiveTime != 0) {
-                // XXX firstReceiveTime is never set here...
-                // We're already dropping 500ms of audio so this probably doesn't matter
-                packetsToDrop += (uint32_t)(PltGetMillis() - firstReceiveTime) / AudioPacketDuration;
-            }
-
             Limelog("Initial audio resync period: %d milliseconds\n", packetsToDrop * AudioPacketDuration);
         }
 
@@ -327,70 +371,46 @@ static void AudioReceiveThreadProc(void* context) {
             continue;
         }
 
-        // Convert fields to host byte-order
-        rtp->sequenceNumber = BE16(rtp->sequenceNumber);
-        rtp->timestamp = BE32(rtp->timestamp);
-        rtp->ssrc = BE32(rtp->ssrc);
-
-        queueStatus = RtpaAddPacket(&rtpAudioQueue, (PRTP_PACKET)&packet->data[0], (uint16_t)packet->header.size);
-        if (RTPQ_HANDLE_NOW(queueStatus)) {
-            if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
-                if (!queuePacketToLbq(&packet)) {
-                    // An exit signal was received
-                    break;
-                }
-                else {
-                    // Ownership should have been taken by the LBQ
-                    LC_ASSERT(packet == NULL);
-                }
-            }
-            else {
-                decodeInputData(packet);
-            }
-        }
-        else {
-            if (RTPQ_PACKET_CONSUMED(queueStatus)) {
-                // The queue consumed our packet, so we must allocate a new one
-                packet = NULL;
-            }
-
-            if (RTPQ_PACKET_READY(queueStatus)) {
-                // If packets are ready, pull them and send them to the decoder
-                uint16_t length;
-                PQUEUED_AUDIO_PACKET queuedPacket;
-                while ((queuedPacket = (PQUEUED_AUDIO_PACKET)RtpaGetQueuedPacket(&rtpAudioQueue, sizeof(QUEUED_AUDIO_PACKET_HEADER), &length)) != NULL) {
-                    // Populate header data (not preserved in queued packets)
-                    queuedPacket->header.size = length;
-
-                    if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
-                        if (!queuePacketToLbq(&queuedPacket)) {
-                            // An exit signal was received
-                            free(queuedPacket);
-                            break;
-                        }
-                        else {
-                            // Ownership should have been taken by the LBQ
-                            LC_ASSERT(queuedPacket == NULL);
-                        }
-                    }
-                    else {
-                        decodeInputData(queuedPacket);
-                        free(queuedPacket);
-                    }
-                }
-
-                // Break on exit
-                if (queuedPacket != NULL) {
-                    break;
-                }
-            }
-        }
+        if (!submitAudioPacket(&packet)) break;
     }
 
     if (packet != NULL) {
         free(packet);
     }
 }
+
+#ifdef LI_AUDIO_TESTING
+// Local synchronous replay only: no sockets, worker threads or audio devices.
+// The queue, FEC recovery, byte-order conversion and decryption are production.
+void LiTestAudioBegin(bool encrypted, const unsigned char key[16], const unsigned char iv[16],
+                      void (*decode)(char*, int)) {
+    AudioEncryptionEnabled = encrypted;
+    AudioPacketDuration = 5;
+    AppVersionQuad[0] = 7;
+    AppVersionQuad[1] = 1;
+    AppVersionQuad[2] = 500;
+    memcpy(StreamConfig.remoteInputAesKey, key, 16);
+    memcpy(StreamConfig.remoteInputAesIv, iv, 16);
+    AudioCallbacks.decodeAndPlaySample = decode;
+    AudioCallbacks.capabilities = CAPABILITY_DIRECT_SUBMIT;
+    initializeAudioStream();
+}
+
+int LiTestAudioPush(const unsigned char* wireDatagram, int length) {
+    if (wireDatagram == NULL || length < (int)sizeof(RTP_PACKET) || length > MAX_PACKET_SIZE) return -1;
+    PQUEUED_AUDIO_PACKET packet = malloc(sizeof(*packet));
+    if (packet == NULL) return -1;
+    packet->header.size = length;
+    memcpy(packet->data, wireDatagram, length);
+    bool result = submitAudioPacket(&packet);
+    free(packet);
+    return result ? 0 : -1;
+}
+
+void LiTestAudioEnd(void) {
+    destroyAudioStream();
+}
+#endif
 
 static void AudioDecoderThreadProc(void* context) {
     int err;
@@ -455,6 +475,16 @@ int startAudioStream(void* audioContext, int arFlags) {
     }
 
     AudioCallbacks.start();
+    if (FreshAudioAfterPing) {
+        // The socket is already bound. Trigger capture only after renderer readiness.
+        err = PltCreateThread("AudioPing", AudioPingThreadProc, NULL, &udpPingThread);
+        if (err != 0) {
+            AudioCallbacks.stop();
+            AudioCallbacks.cleanup();
+            return err;
+        }
+        pingThreadStarted = true;
+    }
 
     err = PltCreateThread("AudioRecv", AudioReceiveThreadProc, NULL, &receiveThread);
     if (err != 0) {
