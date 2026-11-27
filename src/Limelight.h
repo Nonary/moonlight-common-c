@@ -222,6 +222,9 @@ typedef struct _DECODE_UNIT {
     // in the frame header, or 0 if it did not. A frame that lost any of them
     // cannot be decoded; a loss after them only blurs part of the picture.
     uint16_t pyrowaveCriticalPackets;
+
+    // Host-monotonic capture start in microseconds, or zero when unavailable.
+    uint64_t captureStartHostUs;
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
@@ -1047,6 +1050,11 @@ int LiSendHighResHScrollEvent(short scrollAmount);
 // This function returns a time in microseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMicroseconds(void);
+
+// Convert the host's capture clock into LiGetMicroseconds() coordinates.
+// Under a valid mapping, client time = host time + offsetUs.
+bool LiGetCaptureClockOffset(int64_t* offsetUs, uint64_t* uncertaintyUs);
+void LiResetCaptureClock(void);
 
 // This function returns a time in milliseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.

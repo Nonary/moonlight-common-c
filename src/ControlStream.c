@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "CaptureClock.h"
 #include "ControllerHaptics.h"
 #include "ControllerSpeakerPcm.h"
 
@@ -344,6 +345,93 @@ static bool supportsIdrFrameRequest;
 #define LOSS_REPORT_INTERVAL_MS 50
 #define PERIODIC_PING_INTERVAL_MS 100
 
+#define CAPTURE_CLOCK_REQUEST 0x5510
+#define CAPTURE_CLOCK_REPLY 0x5511
+#define CAPTURE_CLOCK_PROBE_US 1000000
+#define CAPTURE_CLOCK_WINDOW_US 8000000
+#define CAPTURE_CLOCK_DRIFT_PPM 500
+
+static PLT_MUTEX captureClockMutex;
+static struct {
+    uint64_t clientReceivedUs;
+    uint64_t delayUs;
+    int64_t offsetUs;
+} captureClockSamples[8];
+static unsigned int captureClockNext;
+static uint64_t captureClockProbeUs;
+static bool captureClockProbePending;
+
+static void clearCaptureClock(void) {
+    memset(captureClockSamples, 0, sizeof(captureClockSamples));
+    captureClockNext = 0;
+    captureClockProbeUs = 0;
+    captureClockProbePending = false;
+}
+
+void LiResetCaptureClock(void) {
+    if (!CaptureTimingEnabled) {
+        return;
+    }
+    PltLockMutex(&captureClockMutex);
+    clearCaptureClock();
+    PltUnlockMutex(&captureClockMutex);
+}
+
+bool LiGetCaptureClockOffset(int64_t* offsetUs, uint64_t* uncertaintyUs) {
+    if (!CaptureTimingEnabled) {
+        return false;
+    }
+
+    PltLockMutex(&captureClockMutex);
+    const uint64_t now = LiGetMicroseconds();
+    uint64_t bestDelay = UINT64_MAX, bestAge = 0;
+    for (unsigned int i = 0; i < sizeof(captureClockSamples) / sizeof(captureClockSamples[0]); ++i) {
+        const uint64_t received = captureClockSamples[i].clientReceivedUs;
+        if (!received || now < received || now - received >= CAPTURE_CLOCK_WINDOW_US) {
+            continue;
+        }
+        const uint64_t delay = captureClockSamples[i].delayUs;
+        const uint64_t age = now - received;
+        if (delay < bestDelay || (delay == bestDelay && age < bestAge)) {
+            *offsetUs = captureClockSamples[i].offsetUs;
+            bestDelay = delay;
+            bestAge = age;
+        }
+    }
+    if (bestDelay != UINT64_MAX) {
+        *uncertaintyUs = (bestDelay + 1) / 2 + (bestAge * CAPTURE_CLOCK_DRIFT_PPM + 999999) / 1000000;
+    }
+    PltUnlockMutex(&captureClockMutex);
+    return bestDelay != UINT64_MAX;
+}
+
+static void acceptCaptureClockReply(char* payload, size_t length, uint64_t receivedUs) {
+    BYTE_BUFFER buffer;
+    uint64_t clientSentUs, hostReceivedUs, hostSentUs;
+    if (length != 24) {
+        return;
+    }
+    BbInitializeWrappedBuffer(&buffer, payload, 0, (int)length, BYTE_ORDER_LITTLE);
+    BbGet64(&buffer, &clientSentUs);
+    BbGet64(&buffer, &hostReceivedUs);
+    BbGet64(&buffer, &hostSentUs);
+    CAPTURE_CLOCK_SAMPLE sample;
+    if (!captureClockSample(clientSentUs, hostReceivedUs, hostSentUs,
+                            receivedUs, CAPTURE_CLOCK_PROBE_US, &sample)) {
+        return;
+    }
+
+    PltLockMutex(&captureClockMutex);
+    if (captureClockProbePending && clientSentUs == captureClockProbeUs) {
+        captureClockProbePending = false;
+        const unsigned int slot = captureClockNext++ % (sizeof(captureClockSamples) / sizeof(captureClockSamples[0]));
+        captureClockSamples[slot].clientReceivedUs = receivedUs;
+        captureClockSamples[slot].delayUs = sample.delayUs;
+        captureClockSamples[slot].offsetUs = sample.offsetUs;
+    }
+    PltUnlockMutex(&captureClockMutex);
+}
+
 // Initializes the control stream
 int initializeControlStream(void) {
     stopping = false;
@@ -357,6 +445,8 @@ int initializeControlStream(void) {
     LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
     PltCreateMutex(&enetMutex);
     PltCreateMutex(&hdrMutex);
+    PltCreateMutex(&captureClockMutex);
+    clearCaptureClock();
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
@@ -435,6 +525,8 @@ void destroyControlStream(void) {
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue));
 
+    CaptureTimingEnabled = false;
+    PltDeleteMutex(&captureClockMutex);
     PltDeleteMutex(&hdrMutex);
     PltDeleteMutex(&enetMutex);
 }
@@ -1510,6 +1602,7 @@ static void controlReceiveThreadFunc(void* context) {
         }
 
         if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            const uint64_t captureClockReceivedUs = CaptureTimingEnabled ? LiGetMicroseconds() : 0;
             PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr;
             int packetLength;
 
@@ -1592,6 +1685,12 @@ static void controlReceiveThreadFunc(void* context) {
             enet_packet_destroy(event.packet);
 
             // All below codepaths must free ctlHdr!!!
+
+            if (CaptureTimingEnabled && ctlHdr->type == CAPTURE_CLOCK_REPLY) {
+                acceptCaptureClockReply((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr), captureClockReceivedUs);
+                free(ctlHdr);
+                continue;
+            }
 
             // Process HDR data immediately to update global HDR enabled state and HDR metadata.
             // The actual client callback will be invoked in the async callback thread.
@@ -1741,6 +1840,29 @@ static void controlReceiveThreadFunc(void* context) {
     }
 }
 
+static void sendCaptureClockProbe(void) {
+    const uint64_t now = LiGetMicroseconds();
+    PltLockMutex(&captureClockMutex);
+    if (captureClockProbeUs && (now < captureClockProbeUs ||
+            now - captureClockProbeUs >= CAPTURE_CLOCK_WINDOW_US)) {
+        clearCaptureClock();
+    }
+    if (captureClockProbeUs && now - captureClockProbeUs < CAPTURE_CLOCK_PROBE_US) {
+        PltUnlockMutex(&captureClockMutex);
+        return;
+    }
+    captureClockProbeUs = now;
+    captureClockProbePending = true;
+    PltUnlockMutex(&captureClockMutex);
+
+    char payload[8];
+    BYTE_BUFFER buffer;
+    BbInitializeWrappedBuffer(&buffer, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut64(&buffer, now);
+    sendMessageEnet(CAPTURE_CLOCK_REQUEST, sizeof(payload), payload, CTRL_CHANNEL_GENERIC,
+                    ENET_PACKET_FLAG_UNSEQUENCED, false);
+}
+
 static void lossStatsThreadFunc(void* context) {
     BYTE_BUFFER byteBuffer;
 
@@ -1752,6 +1874,9 @@ static void lossStatsThreadFunc(void* context) {
         BbPut32(&byteBuffer, 0); // Timestamp?
 
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
+            if (CaptureTimingEnabled) {
+                sendCaptureClockProbe();
+            }
             // For Sunshine servers, send the more detailed per-frame FEC messages
             if (IS_SUNSHINE()) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;

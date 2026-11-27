@@ -1240,6 +1240,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             SunshineFeatureFlags = 0;
         }
 
+        uint32_t captureTimingVersion;
+        CaptureTimingEnabled = IS_SUNSHINE() &&
+            parseSdpAttributeToUInt(response.payload, "x-ss-video.captureTiming", &captureTimingVersion) &&
+            captureTimingVersion == 1;
+
         // Look for the Sunshine encryption flags in the SDP attributes
         if (!parseSdpAttributeToUInt(response.payload, "x-ss-general.encryptionSupported", &EncryptionFeaturesSupported)) {
             EncryptionFeaturesSupported = 0;

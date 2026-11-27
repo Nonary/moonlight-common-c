@@ -44,6 +44,7 @@ static uint16_t lastPacketPayloadLength;
 static bool strictIdrFrameWait;
 static uint64_t syntheticPtsBaseUs;
 static uint16_t frameHostProcessingLatency;
+static uint64_t captureStartHostUs;
 static uint64_t firstPacketReceiveTimeUs;
 static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
@@ -512,6 +513,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu->decodeUnit.frameType = frameType;
             qdu->decodeUnit.frameNumber = frameNumber;
             qdu->decodeUnit.frameHostProcessingLatency = frameHostProcessingLatency;
+            qdu->decodeUnit.captureStartHostUs = captureStartHostUs;
             qdu->decodeUnit.receiveTimeUs = firstPacketReceiveTimeUs;
             qdu->decodeUnit.presentationTimeUs = firstPacketPresentationTime;
             qdu->decodeUnit.rtpTimestamp = firstPacketRtpTimestamp;
@@ -1070,6 +1072,19 @@ static void processRtpPayloadLocked(PNV_VIDEO_PACKET videoPacket, int length,
         else {
             // Other versions don't have a frame header at all
             frameHeaderSize = 0;
+        }
+
+        captureStartHostUs = 0;
+        if (CaptureTimingEnabled && frameHeaderSize == 8 &&
+                currentPos.data[currentPos.offset] == 0x01) {
+            frameHeaderSize += 8;
+            if (currentPos.length < frameHeaderSize) {
+                // The access unit cannot be decoded without the complete header.
+                goto corruptFrame;
+            }
+            BYTE_BUFFER timing;
+            BbInitializeWrappedBuffer(&timing, currentPos.data, currentPos.offset + 8, 8, BYTE_ORDER_LITTLE);
+            BbGet64(&timing, &captureStartHostUs);
         }
 
         LC_ASSERT_VT(currentPos.length >= frameHeaderSize);

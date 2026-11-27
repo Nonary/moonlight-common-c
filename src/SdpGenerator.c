@@ -268,6 +268,9 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
 
     optionHead = NULL;
     err = 0;
+    if (CaptureTimingEnabled) {
+        err |= addAttributeString(&optionHead, "x-ml-video.captureTiming", "1");
+    }
 
     if (IS_SUNSHINE()) {
         // Send client feature flags to Sunshine hosts
