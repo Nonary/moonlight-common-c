@@ -2,6 +2,13 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+
+// Timing is offered by default. An explicit 0 opts out for this process.
+static inline bool captureTimingRequested(void) {
+    const char* value = getenv("MOONLIGHT_CAPTURE_TIMING");
+    return !value || value[0] != '0' || value[1] != '\0';
+}
 
 typedef struct {
     int64_t offsetUs;

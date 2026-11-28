@@ -116,6 +116,7 @@ void fixupMissingCallbacks(PDECODER_RENDERER_CALLBACKS* drCallbacks, PAUDIO_REND
     PCONNECTION_LISTENER_CALLBACKS* clCallbacks);
 void setRecorderCallbacks(PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks);
 
+bool captureTimingSupportedBySdp(const char* payload);
 char* getSdpPayloadForStreamConfig(int rtspClientVersion, int* length);
 
 int initializeControlStream(void);

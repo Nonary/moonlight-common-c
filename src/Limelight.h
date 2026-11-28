@@ -1053,6 +1053,9 @@ uint64_t LiGetMicroseconds(void);
 
 // Convert the host's capture clock into LiGetMicroseconds() coordinates.
 // Under a valid mapping, client time = host time + offsetUs.
+// True when this connection negotiated the optional host capture timestamps.
+bool LiIsCaptureTimingEnabled(void);
+
 bool LiGetCaptureClockOffset(int64_t* offsetUs, uint64_t* uncertaintyUs);
 void LiResetCaptureClock(void);
 

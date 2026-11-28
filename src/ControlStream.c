@@ -377,6 +377,10 @@ void LiResetCaptureClock(void) {
     PltUnlockMutex(&captureClockMutex);
 }
 
+bool LiIsCaptureTimingEnabled(void) {
+    return CaptureTimingEnabled;
+}
+
 bool LiGetCaptureClockOffset(int64_t* offsetUs, uint64_t* uncertaintyUs) {
     if (!CaptureTimingEnabled) {
         return false;

@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "CaptureClock.h"
 #include "Rtsp.h"
 
 #define RTSP_CONNECT_TIMEOUT_SEC 10
@@ -975,6 +976,31 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
     return true;
 }
 
+bool captureTimingSupportedBySdp(const char* payload) {
+    // Capture timing changes the frame header, so require an unambiguous v1
+    // advertisement and the same encrypted ENet mode used for the clock probes.
+    if (!captureTimingRequested() || !IS_SUNSHINE() || !APP_VERSION_AT_LEAST(7, 1, 431)) {
+        return false;
+    }
+
+    const char prefix[] = "a=x-ss-video.captureTiming:";
+    bool offered = false;
+    for (const char* line = payload; line != NULL;) {
+        if (strncmp(line, prefix, sizeof(prefix) - 1) == 0) {
+            const char* value = line + sizeof(prefix) - 1;
+            if (offered || value[0] != '1' ||
+                    (value[1] != '\0' && value[1] != '\n' &&
+                     !(value[1] == '\r' && value[2] == '\n'))) {
+                return false;
+            }
+            offered = true;
+        }
+        const char* newline = strchr(line, '\n');
+        line = newline ? newline + 1 : NULL;
+    }
+    return offered;
+}
+
 // Perform RTSP Handshake with the streaming server machine as part of the connection process
 int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     int ret;
@@ -1240,10 +1266,9 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             SunshineFeatureFlags = 0;
         }
 
-        uint32_t captureTimingVersion;
-        CaptureTimingEnabled = IS_SUNSHINE() &&
-            parseSdpAttributeToUInt(response.payload, "x-ss-video.captureTiming", &captureTimingVersion) &&
-            captureTimingVersion == 1;
+        CaptureTimingEnabled = captureTimingSupportedBySdp(response.payload);
+        Limelog("Host capture timing: %s\n", CaptureTimingEnabled ? "negotiated v1" :
+                captureTimingRequested() ? "unavailable on this host" : "disabled");
 
         // Look for the Sunshine encryption flags in the SDP attributes
         if (!parseSdpAttributeToUInt(response.payload, "x-ss-general.encryptionSupported", &EncryptionFeaturesSupported)) {
